@@ -4,7 +4,9 @@ import { Site } from "../models/Site.js";
 import { User } from "../models/User.js";
 import { requireAuth } from "../middleware/auth.js";
 import { generateSiteHtml } from "../services/htmlGenerator.js";
-import { deployToVercel } from "../services/vercelDeploy.js";
+import { deployToVercel, addCustomDomain } from "../services/vercelDeploy.js";
+
+const DOMAIN_BASE = process.env.CUSTOM_DOMAIN_BASE || "placetopage.com";
 
 const router = Router();
 
@@ -16,6 +18,35 @@ function slugify(text) {
     .replace(/[\s_-]+/g, "-")
     .replace(/^-+|-+$/g, "");
 }
+
+// Validate subdomain: lowercase letters, numbers, hyphens; no leading/trailing hyphens
+const SUBDOMAIN_RE = /^[a-z0-9][a-z0-9-]{0,61}[a-z0-9]$|^[a-z0-9]$/;
+
+// ── GET /check-subdomain?subdomain=xxx ───────────────────────────────────────
+router.get("/check-subdomain", requireAuth, async (req, res, next) => {
+  try {
+    const raw = String(req.query.subdomain || "").toLowerCase().trim();
+    if (!raw) return res.status(400).json({ message: "subdomain is required" });
+    if (!SUBDOMAIN_RE.test(raw)) {
+      return res.json({
+        available: false,
+        subdomain: raw,
+        fullDomain: `${raw}.${DOMAIN_BASE}`,
+        reason: "Only lowercase letters, numbers, and hyphens are allowed.",
+      });
+    }
+    const taken = await Site.exists({ customSubdomain: raw });
+    res.json({
+      available: !taken,
+      subdomain: raw,
+      fullDomain: `${raw}.${DOMAIN_BASE}`,
+      domainBase: DOMAIN_BASE,
+      reason: taken ? "This subdomain is already taken." : null,
+    });
+  } catch (e) {
+    next(e);
+  }
+});
 
 router.get("/stats", requireAuth, async (req, res, next) => {
   try {
@@ -121,21 +152,58 @@ router.post("/:id/deploy", requireAuth, async (req, res, next) => {
       return res.status(503).json({ message: "VERCEL_TOKEN is not configured on the server." });
     }
 
+    // Validate + claim the chosen subdomain
+    const chosenSubdomain = String(req.body.subdomain || "").toLowerCase().trim();
+    if (chosenSubdomain) {
+      if (!SUBDOMAIN_RE.test(chosenSubdomain)) {
+        return res.status(400).json({ message: "Invalid subdomain format." });
+      }
+      const conflict = await Site.findOne({
+        customSubdomain: chosenSubdomain,
+        _id: { $ne: site._id },
+      });
+      if (conflict) {
+        return res.status(409).json({
+          message: `The subdomain "${chosenSubdomain}.${DOMAIN_BASE}" is already taken.`,
+          code: "SUBDOMAIN_TAKEN",
+        });
+      }
+    }
+
+    // Deploy to Vercel
     const deployment = await deployToVercel({
       name: site.name,
       html: site.generatedHtml,
       token: vercelToken,
     });
 
-    site.deploymentUrl = deployment.url;
+    // Attach custom domain (e.g. biryani-blues.placetopage.com) to the Vercel project
+    let liveUrl = deployment.url;
+    if (chosenSubdomain) {
+      const customDomain = `${chosenSubdomain}.${DOMAIN_BASE}`;
+      const domainResult = await addCustomDomain({
+        projectName: deployment.projectName,
+        domain: customDomain,
+        token: vercelToken,
+      });
+      if (domainResult?.ok) {
+        liveUrl = `https://${customDomain}`;
+        console.log(`Custom domain assigned: ${liveUrl}`);
+      } else {
+        console.warn(`Custom domain assignment failed — using Vercel URL: ${liveUrl}`);
+      }
+    }
+
+    site.customSubdomain = chosenSubdomain || null;
+    site.deploymentUrl = liveUrl;
     site.vercelDeploymentId = deployment.deploymentId;
     site.vercelProjectName = deployment.projectName;
-    site.subdomain = deployment.url;
+    site.subdomain = liveUrl;
     site.status = "live";
     await site.save();
 
-    console.log(`Deployed to Vercel: ${deployment.url}`);
-    res.json(site.toObject());
+    console.log(`Deployed: ${liveUrl}`);
+    res.json({ ...site.toObject(), domainBase: DOMAIN_BASE });
   } catch (e) {
     next(e);
   }

@@ -133,3 +133,35 @@ export async function deployToVercel({ name, html, token }) {
     projectName,
   };
 }
+
+/**
+ * Add a custom domain (e.g. "biryani-blues.placetopage.com") to a Vercel project.
+ *
+ * Requires:
+ *  1. The domain's root ("placetopage.com") must already be added to the Vercel account.
+ *  2. A wildcard DNS record: CNAME *.placetopage.com → cname.vercel-dns.com
+ *
+ * Returns { ok: true } on success, { ok: false, error } on failure (caller decides
+ * whether to fall back to the Vercel URL).
+ */
+export async function addCustomDomain({ projectName, domain, token }) {
+  try {
+    const res = await fetch(`${VERCEL_API}/v9/projects/${projectName}/domains`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ name: domain }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      console.warn(`addCustomDomain failed (${res.status}):`, data?.error?.message ?? JSON.stringify(data));
+      return { ok: false, error: data?.error?.message ?? "Domain assignment failed" };
+    }
+    return { ok: true, data };
+  } catch (e) {
+    console.warn("addCustomDomain error:", e.message);
+    return { ok: false, error: e.message };
+  }
+}

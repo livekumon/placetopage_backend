@@ -26,6 +26,16 @@ const siteSchema = new mongoose.Schema(
         vercelProjectName: { type: String, default: null },
         generatedHtml: { type: String, default: null },
         placeData: { type: mongoose.Schema.Types.Mixed, default: null },
+        // Slug-only portion of the custom domain, e.g. "biryani-blues"
+        // Full URL = customSubdomain + "." + CUSTOM_DOMAIN_BASE
+        customSubdomain: {
+          type: String,
+          default: null,
+          sparse: true,
+          unique: true,
+          lowercase: true,
+          trim: true,
+        },
   },
   { timestamps: true }
 );
