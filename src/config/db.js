@@ -1,7 +1,11 @@
 import mongoose from "mongoose";
 
+// Cache the connection across Vercel serverless invocations
+let _conn = null;
+
 export async function connectDb(uri) {
+  if (_conn && mongoose.connection.readyState === 1) return _conn;
   mongoose.set("strictQuery", true);
-  await mongoose.connect(uri);
-  return mongoose.connection;
+  _conn = await mongoose.connect(uri);
+  return _conn;
 }

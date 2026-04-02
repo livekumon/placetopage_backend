@@ -11,18 +11,41 @@ import { seedIfEmpty } from "./seed.js";
 const PORT = Number(process.env.PORT) || 8080;
 const MONGODB_URI = process.env.MONGODB_URI || "mongodb://127.0.0.1:27017/placetowebsite";
 
+// Default origins include both local dev and the deployed Vercel frontend.
+// Override at runtime by setting CORS_ORIGINS=url1,url2 in the environment.
 const corsOrigins = process.env.CORS_ORIGINS
   ? process.env.CORS_ORIGINS.split(",").map((s) => s.trim())
-  : ["http://localhost:5173", "http://127.0.0.1:5173"];
+  : [
+      "http://localhost:5173",
+      "http://127.0.0.1:5173",
+      "https://placetopage-frontend.vercel.app",
+    ];
 
 const app = express();
+
 app.use(
   cors({
-    origin: corsOrigins,
+    origin: (origin, cb) => {
+      // Allow requests with no origin (curl, Postman, server-to-server)
+      if (!origin) return cb(null, true);
+      if (corsOrigins.includes(origin)) return cb(null, true);
+      cb(new Error(`CORS: origin ${origin} not allowed`));
+    },
     credentials: true,
   })
 );
+
 app.use(express.json());
+
+// Ensure DB is connected before every request (safe for serverless cold starts)
+app.use(async (_req, _res, next) => {
+  try {
+    await connectDb(MONGODB_URI);
+    next();
+  } catch (e) {
+    next(e);
+  }
+});
 
 app.get("/api/health", (_req, res) => {
   res.json({ ok: true, service: "place-to-page-api" });
@@ -35,18 +58,25 @@ app.use("/api/enrich", enrichRouter);
 
 app.use((err, _req, res, _next) => {
   console.error(err);
-  res.status(500).json({ message: err.message || "Server error" });
+  const status = err.message?.startsWith("CORS:") ? 403 : 500;
+  res.status(status).json({ message: err.message || "Server error" });
 });
 
-async function main() {
-  await connectDb(MONGODB_URI);
-  await seedIfEmpty();
-  app.listen(PORT, "0.0.0.0", () => {
-    console.log(`API listening on 0.0.0.0:${PORT}`);
-  });
+// ── Local dev: start HTTP server ──────────────────────────────────────────────
+// On Vercel the app is exported as a serverless function; listen is skipped.
+if (!process.env.VERCEL) {
+  connectDb(MONGODB_URI)
+    .then(() => seedIfEmpty())
+    .then(() => {
+      app.listen(PORT, "0.0.0.0", () =>
+        console.log(`API listening on 0.0.0.0:${PORT}`)
+      );
+    })
+    .catch((e) => {
+      console.error(e);
+      process.exit(1);
+    });
 }
 
-main().catch((e) => {
-  console.error(e);
-  process.exit(1);
-});
+// ── Vercel serverless export ──────────────────────────────────────────────────
+export default app;
