@@ -63,6 +63,7 @@ router.get("/stats", requireAuth, async (req, res, next) => {
       pageViewsTotal,
       ctaClicks: 842,
       creditsRemaining: user.creditsRemaining,
+      publishingCredits: user.publishingCredits ?? 0,
       displayName: firstName,
     });
   } catch (e) {
@@ -147,6 +148,18 @@ router.post("/:id/deploy", requireAuth, async (req, res, next) => {
       return res.status(400).json({ message: "No generated HTML found for this site." });
     }
 
+    const user = await User.findById(req.userId);
+    if (!user) return res.status(401).json({ message: "User not found" });
+
+    const skipPayment = process.env.SKIP_PUBLISH_PAYMENT === "true";
+    if (!skipPayment && (user.publishingCredits || 0) < 1) {
+      return res.status(402).json({
+        message:
+          "A Go Live pass is required to publish. Complete the $5 PayPal payment to unlock publishing.",
+        code: "PUBLISHING_CREDITS_REQUIRED",
+      });
+    }
+
     const vercelToken = process.env.VERCEL_TOKEN;
     if (!vercelToken) {
       return res.status(503).json({ message: "VERCEL_TOKEN is not configured on the server." });
@@ -201,6 +214,11 @@ router.post("/:id/deploy", requireAuth, async (req, res, next) => {
     site.subdomain = liveUrl;
     site.status = "live";
     await site.save();
+
+    if (!skipPayment) {
+      user.publishingCredits = Math.max(0, (user.publishingCredits || 0) - 1);
+      await user.save();
+    }
 
     console.log(`Deployed: ${liveUrl}`);
     res.json({ ...site.toObject(), domainBase: DOMAIN_BASE });

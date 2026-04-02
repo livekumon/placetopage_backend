@@ -6,6 +6,7 @@ import sitesRouter from "./routes/sites.js";
 import authRouter from "./routes/auth.js";
 import mapsRouter from "./routes/maps.js";
 import enrichRouter from "./routes/enrich.js";
+import paymentsRouter from "./routes/payments.js";
 import { seedIfEmpty } from "./seed.js";
 
 const PORT = Number(process.env.PORT) || 8080;
@@ -51,10 +52,16 @@ app.get("/api/health", (_req, res) => {
   res.json({ ok: true, service: "place-to-page-api" });
 });
 
+// Public — PayPal JS SDK needs the same client ID as the server (safe to expose)
+app.get("/api/paypal/client-id", (_req, res) => {
+  res.json({ clientId: process.env.PAYPAL_CLIENT_ID || "" });
+});
+
 app.use("/api/auth", authRouter);
 app.use("/api/sites", sitesRouter);
 app.use("/api/maps", mapsRouter);
 app.use("/api/enrich", enrichRouter);
+app.use("/api/payments", paymentsRouter);
 
 app.use((err, _req, res, _next) => {
   console.error(err);

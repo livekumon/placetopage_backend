@@ -13,6 +13,8 @@ const userSchema = new mongoose.Schema(
     passwordHash: { type: String, default: null },
 
     creditsRemaining: { type: Number, default: 1240 },
+    /** One "Go Live" PayPal purchase adds credits; each deploy consumes one */
+    publishingCredits: { type: Number, default: 0 },
   },
   { timestamps: true }
 );

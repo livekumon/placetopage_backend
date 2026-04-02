@@ -16,6 +16,9 @@ function userResponse(user) {
     name: plain.name,
     picture: plain.picture,
     creditsRemaining: plain.creditsRemaining,
+    publishingCredits: plain.publishingCredits ?? 0,
+    /** When true, backend allows deploy without PayPal (local/dev: SKIP_PUBLISH_PAYMENT=true) */
+    skipPublishPayment: process.env.SKIP_PUBLISH_PAYMENT === "true",
     createdAt: plain.createdAt,
   };
 }
