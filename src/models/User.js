@@ -15,7 +15,7 @@ const userSchema = new mongoose.Schema(
 
     creditsRemaining: { type: Number, default: 1240 },
     /** New users receive 1 free credit on registration; each Vercel deploy consumes one. */
-    publishingCredits: { type: Number, default: 1 },
+    publishingCredits: { type: Number, default: 0 },
 
     /** Can open GET /api/admin/metrics with a normal user JWT (e.g. Google SSO) */
     isAdmin: { type: Boolean, default: false, index: true },

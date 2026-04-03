@@ -278,7 +278,7 @@ router.post("/:id/deploy", requireAuth, async (req, res, next) => {
     if (!skipPayment && (user.publishingCredits || 0) < 1) {
       return res.status(402).json({
         message:
-          "You've used your free website credit. Purchase more credits to publish additional websites.",
+          "You need at least one website credit to publish. Purchase a credit starting from $5.",
         code: "PUBLISHING_CREDITS_REQUIRED",
       });
     }
