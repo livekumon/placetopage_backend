@@ -1,8 +1,24 @@
+import Razorpay from "razorpay";
+import crypto from "crypto";
 import mongoose from "mongoose";
 import { paypal, getPayPalClient } from "../config/paypal.js";
 import { Payment } from "../models/Payment.js";
 import { User } from "../models/User.js";
 import { TOKEN_PACK_MAP, TOKEN_PACKS } from "../config/tokenPacks.js";
+import { formatPayPalSdkError } from "../utils/paypalErrors.js";
+
+function getRazorpayClient() {
+  const keyId = process.env.RAZORPAY_KEY_ID;
+  const keySecret = process.env.RAZORPAY_KEY_SECRET;
+  if (!keyId || !keySecret) return null;
+  return new Razorpay({ key_id: keyId, key_secret: keySecret });
+}
+
+/** INR amount for a USD pack — uses RAZORPAY_USD_TO_INR or defaults to 84 */
+function usdToInrPaise(amountUsd) {
+  const rate = Number(process.env.RAZORPAY_USD_TO_INR) || 84;
+  return Math.round(amountUsd * rate * 100); // Razorpay uses paise
+}
 
 const FRONTEND_URL = () =>
   (process.env.FRONTEND_URL || "http://localhost:5173").replace(/\/$/, "");
@@ -66,7 +82,9 @@ export async function createOrder(req, res, next) {
       ],
       application_context: {
         brand_name: "Place to Page",
+        locale: "en-US",
         landing_page: "NO_PREFERENCE",
+        shipping_preference: "NO_SHIPPING",
         user_action: "PAY_NOW",
         return_url: `${FRONTEND_URL()}/purchase-tokens?paypal=success`,
         cancel_url: `${FRONTEND_URL()}/purchase-tokens?paypal=cancelled`,
@@ -94,7 +112,14 @@ export async function createOrder(req, res, next) {
     });
   } catch (e) {
     console.error("createOrder error:", e);
-    next(e);
+    const msg = formatPayPalSdkError(e);
+    const status =
+      typeof e.statusCode === "number" &&
+      e.statusCode >= 400 &&
+      e.statusCode < 600
+        ? e.statusCode
+        : 502;
+    return res.status(status).json({ message: msg });
   }
 }
 
@@ -124,47 +149,84 @@ export async function captureOrder(req, res, next) {
     const capture = await getPayPalClient().execute(captureReq);
 
     if (capture.result.status === "COMPLETED") {
-      const session = await mongoose.startSession();
-      session.startTransaction();
-      try {
-        payment.status = "completed";
-        const pu = capture.result.purchase_units?.[0];
-        const cap = pu?.payments?.captures?.[0];
-        payment.paypalPaymentId = cap?.id;
-        payment.paypalResponse = capture.result;
-        payment.completedAt = new Date();
-        const payer = capture.result.payer;
-        if (payer?.email_address) payment.payerEmail = payer.email_address;
-        if (payer?.name) {
-          const g = payer.name.given_name || "";
-          const s = payer.name.surname || "";
-          payment.payerName = `${g} ${s}`.trim();
-        }
-        await payment.save({ session });
-
-        const user = await User.findById(userId).session(session);
-        if (!user) throw new Error("User not found");
-        user.publishingCredits = (user.publishingCredits || 0) + payment.publishingCreditsGranted;
-        await user.save({ session });
-
-        await session.commitTransaction();
-      } catch (err) {
-        await session.abortTransaction();
-        throw err;
-      } finally {
-        session.endSession();
+      const pu = capture.result.purchase_units?.[0];
+      const cap = pu?.payments?.captures?.[0];
+      const payer = capture.result.payer;
+      let payerName;
+      if (payer?.name) {
+        const g = payer.name.given_name || "";
+        const s = payer.name.surname || "";
+        payerName = `${g} ${s}`.trim();
       }
 
-      const user = await User.findById(userId).lean();
+      // No multi-document transaction: standalone MongoDB does not support sessions.
+      // Atomic payment row update prevents double-credit; then $inc user credits.
+      const updatedPayment = await Payment.findOneAndUpdate(
+        {
+          _id: payment._id,
+          userId,
+          status: { $ne: "completed" },
+        },
+        {
+          $set: {
+            status: "completed",
+            paypalPaymentId: cap?.id,
+            paypalResponse: capture.result,
+            completedAt: new Date(),
+            ...(payer?.email_address && { payerEmail: payer.email_address }),
+            ...(payerName && { payerName }),
+          },
+        },
+        { new: true }
+      );
+
+      if (!updatedPayment) {
+        const existing = await Payment.findOne({
+          paypalOrderId: orderId,
+          userId,
+        }).lean();
+        if (existing?.status === "completed") {
+          const u = await User.findById(userId).lean();
+          return res.json({
+            payment: {
+              id: String(existing._id),
+              status: existing.status,
+              publishingCreditsGranted: existing.publishingCreditsGranted,
+            },
+            user: {
+              publishingCredits: u?.publishingCredits ?? 0,
+              creditsRemaining: u?.creditsRemaining ?? 0,
+            },
+          });
+        }
+        return res.status(400).json({
+          message: "Could not finalize payment. Try again or contact support.",
+        });
+      }
+
+      const creditsToAdd = updatedPayment.publishingCreditsGranted;
+      const user = await User.findByIdAndUpdate(
+        userId,
+        { $inc: { publishingCredits: creditsToAdd } },
+        { new: true }
+      );
+
+      if (!user) {
+        console.error("captureOrder: user not found after payment", userId);
+        return res.status(500).json({
+          message: "Payment recorded but account update failed. Contact support.",
+        });
+      }
+
       return res.json({
         payment: {
-          id: String(payment._id),
-          status: payment.status,
-          publishingCreditsGranted: payment.publishingCreditsGranted,
+          id: String(updatedPayment._id),
+          status: updatedPayment.status,
+          publishingCreditsGranted: updatedPayment.publishingCreditsGranted,
         },
         user: {
-          publishingCredits: user?.publishingCredits ?? 0,
-          creditsRemaining: user?.creditsRemaining ?? 0,
+          publishingCredits: user.publishingCredits ?? 0,
+          creditsRemaining: user.creditsRemaining ?? 0,
         },
       });
     }
@@ -178,7 +240,14 @@ export async function captureOrder(req, res, next) {
     });
   } catch (e) {
     console.error("captureOrder error:", e);
-    next(e);
+    const msg = formatPayPalSdkError(e);
+    const status =
+      typeof e.statusCode === "number" &&
+      e.statusCode >= 400 &&
+      e.statusCode < 600
+        ? e.statusCode
+        : 502;
+    return res.status(status).json({ message: msg });
   }
 }
 
@@ -207,6 +276,140 @@ export async function getPaymentById(req, res, next) {
     }
     res.json({ payment });
   } catch (e) {
+    next(e);
+  }
+}
+
+// ── Razorpay ─────────────────────────────────────────────────────────────────
+
+export function getRazorpayKeyId(_req, res) {
+  res.json({ keyId: process.env.RAZORPAY_KEY_ID || "" });
+}
+
+export async function createRazorpayOrder(req, res, next) {
+  try {
+    const rzp = getRazorpayClient();
+    if (!rzp) {
+      return res.status(503).json({
+        message: "Razorpay is not configured. Set RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET.",
+      });
+    }
+
+    const productType = String(req.body?.productType || "go_live");
+    const pack = resolvePack(productType);
+    if (!pack) {
+      return res.status(400).json({ message: "Unsupported productType" });
+    }
+
+    const amountPaise = usdToInrPaise(pack.amountUsd);
+    const userId = req.userId;
+
+    const order = await rzp.orders.create({
+      amount: amountPaise,
+      currency: "INR",
+      receipt: `p2p_${Date.now()}`,
+      notes: {
+        productType,
+        userId: String(userId),
+        credits: String(pack.credits),
+      },
+    });
+
+    const payment = await Payment.create({
+      userId,
+      paypalOrderId: order.id, // reuse field for Razorpay order id
+      amount: pack.amountUsd,
+      currency: "INR",
+      status: "created",
+      productType,
+      publishingCreditsGranted: pack.credits,
+      paymentMethod: "razorpay",
+      paypalResponse: order,
+    });
+
+    res.status(201).json({
+      orderId: order.id,
+      paymentId: String(payment._id),
+      amountPaise,
+      currency: "INR",
+      pack: { label: pack.label, credits: pack.credits, amountUsd: pack.amountUsd },
+    });
+  } catch (e) {
+    console.error("createRazorpayOrder error:", e);
+    next(e);
+  }
+}
+
+export async function verifyRazorpayPayment(req, res, next) {
+  try {
+    const { razorpay_order_id, razorpay_payment_id, razorpay_signature, paymentId } = req.body;
+
+    if (!razorpay_order_id || !razorpay_payment_id || !razorpay_signature || !paymentId) {
+      return res.status(400).json({ message: "Missing required fields for verification." });
+    }
+
+    const keySecret = process.env.RAZORPAY_KEY_SECRET;
+    if (!keySecret) {
+      return res.status(503).json({ message: "Razorpay not configured on server." });
+    }
+
+    // Verify HMAC signature
+    const expectedSig = crypto
+      .createHmac("sha256", keySecret)
+      .update(`${razorpay_order_id}|${razorpay_payment_id}`)
+      .digest("hex");
+
+    if (expectedSig !== razorpay_signature) {
+      return res.status(400).json({ message: "Payment verification failed: invalid signature." });
+    }
+
+    const userId = req.userId;
+    const payment = await Payment.findOne({ _id: paymentId, userId });
+    if (!payment) {
+      return res.status(404).json({ message: "Payment record not found." });
+    }
+    if (payment.status === "completed") {
+      return res.status(400).json({ message: "Payment already completed." });
+    }
+
+    const session = await mongoose.startSession();
+    session.startTransaction();
+    let user;
+    try {
+      payment.status = "completed";
+      payment.paypalPaymentId = razorpay_payment_id;
+      payment.completedAt = new Date();
+      payment.paypalResponse = { razorpay_order_id, razorpay_payment_id, razorpay_signature };
+      await payment.save({ session });
+
+      user = await User.findByIdAndUpdate(
+        userId,
+        { $inc: { publishingCredits: payment.publishingCreditsGranted } },
+        { new: true, session }
+      );
+      if (!user) throw new Error("User not found");
+
+      await session.commitTransaction();
+    } catch (err) {
+      await session.abortTransaction();
+      throw err;
+    } finally {
+      session.endSession();
+    }
+
+    return res.json({
+      payment: {
+        id: String(payment._id),
+        status: payment.status,
+        publishingCreditsGranted: payment.publishingCreditsGranted,
+      },
+      user: {
+        publishingCredits: user.publishingCredits ?? 0,
+        creditsRemaining: user.creditsRemaining ?? 0,
+      },
+    });
+  } catch (e) {
+    console.error("verifyRazorpayPayment error:", e);
     next(e);
   }
 }
