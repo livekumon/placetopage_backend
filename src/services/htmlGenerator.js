@@ -151,8 +151,8 @@ export function generateSiteHtml({ name, theme = "light", placeData = {} }) {
   const cleanWebsite = website ? website.replace(/^https?:\/\/(www\.)?/, "") : "";
   const telHref = phone ? `tel:${phone.replace(/[\s()\-+]/g, "")}` : null;
 
-  // ── Hero slideshow slides ─────────────────────────────────────────────────
-  const slideshowPhotos = allPhotos.slice(0, Math.min(6, allPhotos.length));
+  // ── Hero — always a single selected image (no carousel) ──────────────────
+  const slideshowPhotos = heroPhoto ? [heroPhoto] : [];
   const slideDuration = 5; // seconds per slide
   const totalDuration = slideDuration * slideshowPhotos.length;
 
