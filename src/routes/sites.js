@@ -278,7 +278,7 @@ router.post("/:id/deploy", requireAuth, async (req, res, next) => {
     if (!skipPayment && (user.publishingCredits || 0) < 1) {
       return res.status(402).json({
         message:
-          "A Go Live pass is required to publish. Complete the $5 PayPal payment to unlock publishing.",
+          "You've used your free website credit. Purchase more credits to publish additional websites.",
         code: "PUBLISHING_CREDITS_REQUIRED",
       });
     }
