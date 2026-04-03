@@ -41,17 +41,14 @@ const siteSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
-// Unique only for real substrings; many sites omit the field (no duplicate-null errors).
+// Unique only for real strings — $type:"string" is supported by all MongoDB versions
+// and naturally excludes null, missing, and "" (empty strings are type string but filtered by app logic).
 siteSchema.index(
   { customSubdomain: 1 },
   {
     unique: true,
     partialFilterExpression: {
-      $and: [
-        { customSubdomain: { $exists: true } },
-        { customSubdomain: { $ne: null } },
-        { customSubdomain: { $ne: "" } },
-      ],
+      customSubdomain: { $exists: true, $type: "string" },
     },
   }
 );
