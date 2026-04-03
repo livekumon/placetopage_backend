@@ -164,6 +164,62 @@ router.get("/charts/growth", requireAdminAccess, async (req, res, next) => {
   }
 });
 
+// ── Update user credits ───────────────────────────────────────────────────────
+
+router.patch("/users/:id/credits", requireAdminAccess, async (req, res, next) => {
+  try {
+    if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+      return res.status(400).json({ message: "Invalid user ID" });
+    }
+
+    const { add, set } = req.body;
+
+    if (add === undefined && set === undefined) {
+      return res.status(400).json({ message: "Provide either 'add' (relative) or 'set' (absolute) credits." });
+    }
+
+    let user;
+    if (set !== undefined) {
+      const val = parseInt(set, 10);
+      if (isNaN(val) || val < 0) {
+        return res.status(400).json({ message: "'set' must be a non-negative integer." });
+      }
+      user = await User.findByIdAndUpdate(
+        req.params.id,
+        { $set: { publishingCredits: val } },
+        { new: true }
+      );
+    } else {
+      const delta = parseInt(add, 10);
+      if (isNaN(delta)) {
+        return res.status(400).json({ message: "'add' must be an integer." });
+      }
+      user = await User.findByIdAndUpdate(
+        req.params.id,
+        { $inc: { publishingCredits: delta } },
+        { new: true }
+      );
+      // Clamp to 0 if subtraction went negative
+      if ((user?.publishingCredits ?? 0) < 0) {
+        user = await User.findByIdAndUpdate(
+          req.params.id,
+          { $set: { publishingCredits: 0 } },
+          { new: true }
+        );
+      }
+    }
+
+    if (!user) return res.status(404).json({ message: "User not found" });
+
+    res.json({
+      id: String(user._id),
+      publishingCredits: user.publishingCredits ?? 0,
+    });
+  } catch (e) {
+    next(e);
+  }
+});
+
 // ── Users list ────────────────────────────────────────────────────────────────
 
 router.get("/users", requireAdminAccess, async (req, res, next) => {
