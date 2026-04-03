@@ -9,37 +9,89 @@ const PLACES_V1 = "https://places.googleapis.com/v1";
 
 // ── URL validation ────────────────────────────────────────────────────────────
 
+/**
+ * Returns true for any URL format that Google uses to share map locations.
+ * Kept intentionally broad so we attempt expansion/lookup rather than
+ * rejecting valid but unfamiliar links outright.
+ */
 function isGoogleMapsUrl(url) {
   try {
     const u = new URL(url);
     const h = u.hostname.toLowerCase();
     return (
-      h.startsWith("maps.google.") ||        // maps.google.com / .co.in / .co.uk …
+      h.startsWith("maps.google.")    ||  // maps.google.com / .co.in / .co.uk …
       ((h === "www.google.com" || h === "google.com") &&
         u.pathname.startsWith("/maps")) ||
       (h === "goo.gl" && u.pathname.startsWith("/maps")) ||
-      h === "maps.app.goo.gl"
+      h === "maps.app.goo.gl"         ||  // standard share link
+      h === "share.google"            ||  // new share.google/XXXXX format
+      h === "g.co"                        // Google's own short-domain
     );
   } catch {
     return false;
   }
 }
 
-// ── Short-URL expander (goo.gl / maps.app.goo.gl) ────────────────────────────
+/**
+ * Returns true for URL formats that are short/opaque and need a redirect
+ * chain to be resolved into a full Google Maps URL before we can parse them.
+ */
+function needsExpansion(url) {
+  try {
+    const h = new URL(url).hostname.toLowerCase();
+    return (
+      h === "goo.gl"           ||
+      h === "maps.app.goo.gl"  ||
+      h === "share.google"     ||
+      h === "g.co"
+    );
+  } catch {
+    return false;
+  }
+}
 
-function expandShortUrl(shortUrl) {
+// ── Short-URL expander — follows the full redirect chain ──────────────────────
+
+/** Follows a single HTTP redirect and returns the Location header, or null. */
+function followOneRedirect(url) {
   return new Promise((resolve) => {
-    const req = https.get(shortUrl, { timeout: 6000 }, (res) => {
-      res.resume();
-      if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-        resolve(res.headers.location);
-      } else {
-        resolve(shortUrl);
-      }
-    });
-    req.on("error", () => resolve(shortUrl));
-    req.on("timeout", () => { req.destroy(); resolve(shortUrl); });
+    try {
+      const req = https.get(url, { timeout: 8000 }, (res) => {
+        res.resume();
+        if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+          // Location may be relative — resolve against the current URL
+          try {
+            resolve(new URL(res.headers.location, url).href);
+          } catch {
+            resolve(res.headers.location);
+          }
+        } else {
+          resolve(null);
+        }
+      });
+      req.on("error", () => resolve(null));
+      req.on("timeout", () => { req.destroy(); resolve(null); });
+    } catch {
+      resolve(null);
+    }
   });
+}
+
+/**
+ * Follows a redirect chain up to `maxHops` times.
+ * Stops early once we land on a URL that no longer redirects or that is
+ * already a full Google Maps URL (no further expansion needed).
+ */
+async function expandShortUrl(shortUrl, maxHops = 6) {
+  let current = shortUrl;
+  for (let i = 0; i < maxHops; i++) {
+    const next = await followOneRedirect(current);
+    if (!next || next === current) break;
+    current = next;
+    // Once we've landed on a full maps URL, no need to keep following
+    if (!needsExpansion(current)) break;
+  }
+  return current;
 }
 
 // ── Place ID extraction from URL ──────────────────────────────────────────────
@@ -241,9 +293,20 @@ router.post("/lookup", requireAuth, async (req, res, next) => {
       });
     }
 
-    // Expand short links (goo.gl / maps.app.goo.gl) before parsing
-    if (/goo\.gl|maps\.app\.goo\.gl/.test(url)) {
-      url = await expandShortUrl(url);
+    // Expand short / opaque links before parsing (goo.gl, maps.app.goo.gl,
+    // share.google, g.co — all redirect to the full canonical Maps URL).
+    if (needsExpansion(url)) {
+      const expanded = await expandShortUrl(url);
+      // After expansion, re-validate — the resolved URL must still be a Maps URL.
+      // If it's not (e.g. a generic google.com page), surface a clear error.
+      if (expanded !== url && !isGoogleMapsUrl(expanded)) {
+        return res.status(422).json({
+          code: "NOT_GOOGLE_MAPS",
+          message:
+            "That link didn't resolve to a Google Maps business page. Please open the business on Google Maps and copy the URL from the address bar.",
+        });
+      }
+      url = expanded;
     }
 
     // Try to extract the ChIJ… place ID directly from the URL
