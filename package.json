@@ -10,6 +10,7 @@
     "start": "node src/index.js",
     "dev": "node --watch src/index.js",
     "fix:subdomain-index": "node scripts/fix-custom-subdomain-index.js",
+    "fix:google-id-index": "node scripts/fix-google-id-index.js",
     "test": "node --test",
     "test:gcs": "node --test test/gcp-connection.test.js"
   },
