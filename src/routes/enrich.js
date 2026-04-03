@@ -1,6 +1,7 @@
 import { Router } from "express";
 import Anthropic from "@anthropic-ai/sdk";
 import { requireAuth } from "../middleware/auth.js";
+import { slugFromLLMSubdomainWords } from "../utils/subdomainSlug.js";
 
 const router = Router();
 
@@ -66,7 +67,8 @@ Generate the following content as a valid JSON object. Be specific to this busin
   "heroHeadline": "A bold 6–10 word headline for the website hero section. Focus on the customer benefit or experience.",
   "ctaText": "2–4 word call-to-action button text suited to this business type (e.g. Book a Table, Order Now, Visit Us, Reserve Your Spot)",
   "seoDescription": "A 140–160 character meta description for Google search results. Include the business name, location and main offering.",
-  "highlights": ["3–4 short feature highlights shown as bullet points on the page, max 8 words each"]
+  "highlights": ["3–4 short feature highlights shown as bullet points on the page, max 8 words each"],
+  "subdomainWords": "1, 2, or 3 words only, separated by single spaces. No hyphens, underscores, punctuation, or numbers unless they are part of the real brand name. Base this on the business name and what makes it recognizable — a distinctive public URL label (e.g. Biryani Blues or Sunrise Kitchen Delhi). Do not use generic phrases like Great Food or Best Shop."
 }
 
 Return ONLY the JSON object with no extra text, markdown, or code fences.`;
@@ -85,7 +87,7 @@ router.post("/", requireAuth, async (req, res, next) => {
 
     const message = await client.messages.create({
       model: "claude-sonnet-4-5",
-      max_tokens: 1024,
+      max_tokens: 1200,
       messages: [
         {
           role: "user",
@@ -109,13 +111,22 @@ router.post("/", requireAuth, async (req, res, next) => {
       }
     }
 
+    const phrase =
+      typeof content.subdomainWords === "string" ? content.subdomainWords.trim().slice(0, 120) : "";
+    let suggestedCustomSubdomain = slugFromLLMSubdomainWords(phrase);
+    if (!suggestedCustomSubdomain) {
+      suggestedCustomSubdomain = slugFromLLMSubdomainWords(place.name || "");
+    }
+
     res.json({
-      description:    content.description    ?? "",
-      tagline:        content.tagline         ?? "",
-      heroHeadline:   content.heroHeadline    ?? "",
-      ctaText:        content.ctaText         ?? "Learn More",
-      seoDescription: content.seoDescription  ?? "",
-      highlights:     Array.isArray(content.highlights) ? content.highlights.slice(0, 4) : [],
+      description: content.description ?? "",
+      tagline: content.tagline ?? "",
+      heroHeadline: content.heroHeadline ?? "",
+      ctaText: content.ctaText ?? "Learn More",
+      seoDescription: content.seoDescription ?? "",
+      highlights: Array.isArray(content.highlights) ? content.highlights.slice(0, 4) : [],
+      suggestedCustomSubdomain,
+      subdomainSuggestionPhrase: phrase,
     });
   } catch (e) {
     // No API key configured — return empty fields so the flow continues manually
@@ -123,8 +134,14 @@ router.post("/", requireAuth, async (req, res, next) => {
       return res.status(503).json({
         code: "NO_ANTHROPIC_KEY",
         message: e.message,
-        description: "", tagline: "", heroHeadline: "",
-        ctaText: "", seoDescription: "", highlights: [],
+        description: "",
+        tagline: "",
+        heroHeadline: "",
+        ctaText: "",
+        seoDescription: "",
+        highlights: [],
+        suggestedCustomSubdomain: "",
+        subdomainSuggestionPhrase: "",
       });
     }
     next(e);

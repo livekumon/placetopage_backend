@@ -66,20 +66,55 @@ async function waitForReady(deploymentId, token, { maxWaitMs = 90000, pollMs = 2
 }
 
 /**
+ * Resolve Vercel project id/name from a previous deployment (backfill for older
+ * Site records missing vercelProjectId / vercelProjectName).
+ */
+export async function resolveVercelProjectFromDeployment(deploymentId, token) {
+  if (!deploymentId || !token) return { projectId: null, projectName: null };
+  try {
+    const res = await fetch(`${VERCEL_API}/v13/deployments/${deploymentId}`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (!res.ok) return { projectId: null, projectName: null };
+    const data = await res.json();
+    const projectId =
+      typeof data.projectId === "string" && data.projectId.trim() ? data.projectId.trim() : null;
+    const projectName =
+      (typeof data.project?.name === "string" && data.project.name.trim()) ||
+      (typeof data.name === "string" && data.name.trim()) ||
+      null;
+    return { projectId, projectName };
+  } catch {
+    return { projectId: null, projectName: null };
+  }
+}
+
+/**
  * Deploy a single index.html to Vercel as a static site.
  *
- * Returns { deploymentId, url } where url is the live https:// address.
+ * When `targetProjectId` or `targetProjectName` is set from a prior publish, the
+ * new deployment targets that existing project (Vercel API: `project` overrides
+ * `name`) so production aliases stay on the same site instead of creating a new project.
+ *
+ * Returns { deploymentId, url, projectName, projectId }.
  *
  * Vercel free tier: unlimited static deployments.
  * Auth: Personal Access Token from vercel.com/account/tokens
  */
-export async function deployToVercel({ name, html, token }) {
+export async function deployToVercel({
+  name,
+  html,
+  token,
+  targetProjectId = null,
+  targetProjectName = null,
+}) {
   if (!token) throw new Error("VERCEL_TOKEN is not configured.");
 
-  const projectName = toProjectName(name);
+  const id = targetProjectId && String(targetProjectId).trim();
+  const trimmedName = targetProjectName && String(targetProjectName).trim();
+  const derivedName = trimmedName || toProjectName(name);
 
   const body = {
-    name: projectName,
     target: "production",
     projectSettings: {
       framework: null,
@@ -95,6 +130,11 @@ export async function deployToVercel({ name, html, token }) {
       },
     ],
   };
+  if (id) {
+    body.project = id;
+  } else {
+    body.name = derivedName;
+  }
 
   const res = await fetch(`${VERCEL_API}/v13/deployments`, {
     method: "POST",
@@ -114,8 +154,13 @@ export async function deployToVercel({ name, html, token }) {
 
   const data = await res.json();
 
+  const projectIdOut =
+    typeof data.projectId === "string" && data.projectId.trim() ? data.projectId.trim() : id || null;
+  const projectNameOut =
+    (typeof data.project?.name === "string" && data.project.name.trim()) || derivedName;
+
   // Disable SSO/authentication protection so the site is publicly accessible
-  await disableDeploymentProtection(projectName, token);
+  await disableDeploymentProtection(projectNameOut, token);
 
   // Wait until Vercel confirms the deployment is READY before returning the URL
   console.log(`Waiting for deployment ${data.id} to be ready…`);
@@ -130,8 +175,72 @@ export async function deployToVercel({ name, html, token }) {
   return {
     deploymentId: data.id,
     url: deployUrl,
-    projectName,
+    projectName: projectNameOut,
+    projectId: projectIdOut,
   };
+}
+
+function vercelTeamQuerySuffix() {
+  const teamId = process.env.VERCEL_TEAM_ID?.trim();
+  return teamId ? `?teamId=${encodeURIComponent(teamId)}` : "";
+}
+
+async function resolveVercelProjectId({ projectId, deploymentId, token }) {
+  const trimmed = projectId && String(projectId).trim();
+  if (trimmed) return trimmed;
+  if (!deploymentId || !token) return null;
+  const resolved = await resolveVercelProjectFromDeployment(deploymentId, token);
+  return resolved.projectId && String(resolved.projectId).trim() ? resolved.projectId.trim() : null;
+}
+
+/**
+ * Pause the Vercel project so production domains stop serving the deployment.
+ * See: POST /v1/projects/{projectId}/pause
+ */
+export async function pauseVercelProjectForSite({ projectId, deploymentId, token }) {
+  if (!token) return { ok: false, error: "VERCEL_TOKEN is not configured" };
+  const pid = await resolveVercelProjectId({ projectId, deploymentId, token });
+  if (!pid) return { ok: false, error: "No Vercel project id for this site" };
+
+  const q = vercelTeamQuerySuffix();
+  const res = await fetch(`${VERCEL_API}/v1/projects/${encodeURIComponent(pid)}/pause${q}`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json",
+    },
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    const msg = err.error?.message || res.statusText || "Pause failed";
+    return { ok: false, error: msg };
+  }
+  return { ok: true };
+}
+
+/**
+ * Unpause after restore from recycle bin so the project can serve again.
+ * See: POST /v1/projects/{projectId}/unpause
+ */
+export async function unpauseVercelProjectForSite({ projectId, deploymentId, token }) {
+  if (!token) return { ok: false, error: "VERCEL_TOKEN is not configured" };
+  const pid = await resolveVercelProjectId({ projectId, deploymentId, token });
+  if (!pid) return { ok: false, error: "No Vercel project id for this site" };
+
+  const q = vercelTeamQuerySuffix();
+  const res = await fetch(`${VERCEL_API}/v1/projects/${encodeURIComponent(pid)}/unpause${q}`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json",
+    },
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    const msg = err.error?.message || res.statusText || "Unpause failed";
+    return { ok: false, error: msg };
+  }
+  return { ok: true };
 }
 
 /**

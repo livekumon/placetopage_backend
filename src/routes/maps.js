@@ -265,8 +265,8 @@ router.post("/lookup", requireAuth, async (req, res, next) => {
 
     const place = await fetchPlaceDetails(placeId, apiKey);
 
-    // Resolve up to 5 photo URLs in parallel (server-side → key-free CDN URLs)
-    const photoNames = (place.photos ?? []).slice(0, 5).map((p) => p.name).filter(Boolean);
+    // Resolve up to 20 photo URLs in parallel (server-side → key-free CDN URLs)
+    const photoNames = (place.photos ?? []).slice(0, 20).map((p) => p.name).filter(Boolean);
     const resolvedPhotos = await Promise.all(
       photoNames.map((name) => resolvePhotoUrl(name, apiKey))
     );

@@ -3,6 +3,8 @@ import bcrypt from "bcryptjs";
 import { OAuth2Client } from "google-auth-library";
 import { User } from "../models/User.js";
 import { requireAuth, signUserToken } from "../middleware/auth.js";
+import { recordLoginEvent } from "../services/appStats.js";
+import { ensureUserIsAdminIfListed, isListedAdminEmail } from "../services/promoteAdmins.js";
 
 const router = Router();
 
@@ -17,6 +19,7 @@ function userResponse(user) {
     picture: plain.picture,
     creditsRemaining: plain.creditsRemaining,
     publishingCredits: plain.publishingCredits ?? 0,
+    isAdmin: Boolean(plain.isAdmin),
     /** When true, backend allows deploy without PayPal (local/dev: SKIP_PUBLISH_PAYMENT=true) */
     skipPublishPayment: process.env.SKIP_PUBLISH_PAYMENT === "true",
     createdAt: plain.createdAt,
@@ -52,10 +55,12 @@ router.post("/register", async (req, res, next) => {
     }
 
     const passwordHash = await bcrypt.hash(String(password), 12);
+    const emailNorm = String(email).toLowerCase().trim();
     const user = await User.create({
       name: String(name).trim(),
-      email: String(email).toLowerCase().trim(),
+      email: emailNorm,
       passwordHash,
+      isAdmin: isListedAdminEmail(emailNorm),
     });
 
     const token = signUserToken(user._id);
@@ -91,6 +96,8 @@ router.post("/login", async (req, res, next) => {
     const match = await bcrypt.compare(String(password), user.passwordHash);
     if (!match) return invalid();
 
+    await ensureUserIsAdminIfListed(user._id);
+    await recordLoginEvent();
     const token = signUserToken(user._id);
     res.json({ token, user: userResponse(user) });
   } catch (e) {
@@ -149,6 +156,8 @@ router.post("/google/login", async (req, res, next) => {
     user.picture = profile.picture || user.picture;
     await user.save();
 
+    await ensureUserIsAdminIfListed(user._id);
+    await recordLoginEvent();
     const token = signUserToken(user._id);
     res.json({ token, user: userResponse(user) });
   } catch (e) {
@@ -175,6 +184,8 @@ router.post("/google/register", async (req, res, next) => {
       user.name = profile.name || user.name;
       user.picture = profile.picture || user.picture;
       await user.save();
+      await ensureUserIsAdminIfListed(user._id);
+      await recordLoginEvent();
       const token = signUserToken(user._id);
       return res.json({ token, user: userResponse(user) });
     }
@@ -184,6 +195,7 @@ router.post("/google/register", async (req, res, next) => {
       email: profile.email,
       name: profile.name,
       picture: profile.picture,
+      isAdmin: isListedAdminEmail(profile.email),
     });
 
     const token = signUserToken(user._id);

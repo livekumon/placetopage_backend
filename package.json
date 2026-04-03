@@ -8,10 +8,14 @@
   },
   "scripts": {
     "start": "node src/index.js",
-    "dev": "node --watch src/index.js"
+    "dev": "node --watch src/index.js",
+    "fix:subdomain-index": "node scripts/fix-custom-subdomain-index.js",
+    "test": "node --test",
+    "test:gcs": "node --test test/gcp-connection.test.js"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.82.0",
+    "@google-cloud/storage": "^7.19.0",
     "@paypal/checkout-server-sdk": "^1.0.3",
     "bcryptjs": "^3.0.3",
     "cors": "^2.8.5",
@@ -19,6 +23,10 @@
     "express": "^4.21.0",
     "google-auth-library": "^10.6.2",
     "jsonwebtoken": "^9.0.3",
-    "mongoose": "^8.7.0"
+    "mongoose": "^8.7.0",
+    "multer": "^2.1.1"
+  },
+  "devDependencies": {
+    "@types/multer": "^2.1.0"
   }
 }

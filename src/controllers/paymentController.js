@@ -2,20 +2,34 @@ import mongoose from "mongoose";
 import { paypal, getPayPalClient } from "../config/paypal.js";
 import { Payment } from "../models/Payment.js";
 import { User } from "../models/User.js";
+import { TOKEN_PACK_MAP, TOKEN_PACKS } from "../config/tokenPacks.js";
 
 const FRONTEND_URL = () =>
   (process.env.FRONTEND_URL || "http://localhost:5173").replace(/\/$/, "");
 
-function goLiveAmountUsd() {
-  const raw = process.env.PAYPAL_GO_LIVE_AMOUNT_USD;
-  const n = raw != null && raw !== "" ? Number(raw) : 5;
-  return Number.isFinite(n) && n >= 0 ? n : 5;
+/** Resolve pack data for a given productType. Falls back to env-based single-pack for 'go_live'. */
+function resolvePack(productType) {
+  if (TOKEN_PACK_MAP[productType]) return TOKEN_PACK_MAP[productType];
+
+  if (productType === "go_live") {
+    const raw = process.env.PAYPAL_GO_LIVE_AMOUNT_USD;
+    const amount = raw != null && raw !== "" ? Number(raw) : 5;
+    const rawC = process.env.PAYPAL_GO_LIVE_PUBLISHING_CREDITS;
+    const credits = rawC != null && rawC !== "" ? Number.parseInt(String(rawC), 10) : 1;
+    return {
+      id: "go_live",
+      credits: Number.isFinite(credits) && credits > 0 ? credits : 1,
+      amountUsd: Number.isFinite(amount) && amount >= 0 ? amount : 5,
+      label: "Go Live",
+      description: "Publish your site to placetopage.com",
+    };
+  }
+
+  return null;
 }
 
-function goLivePublishingCredits() {
-  const raw = process.env.PAYPAL_GO_LIVE_PUBLISHING_CREDITS;
-  const n = raw != null && raw !== "" ? Number.parseInt(String(raw), 10) : 1;
-  return Number.isFinite(n) && n > 0 ? n : 1;
+export async function getTokenPacks(_req, res) {
+  res.json({ packs: TOKEN_PACKS });
 }
 
 export async function createOrder(req, res, next) {
@@ -27,12 +41,13 @@ export async function createOrder(req, res, next) {
     }
 
     const productType = String(req.body?.productType || "go_live");
-    if (productType !== "go_live") {
+    const pack = resolvePack(productType);
+    if (!pack) {
       return res.status(400).json({ message: "Unsupported productType" });
     }
 
-    const amount = goLiveAmountUsd();
-    const creditsGranted = goLivePublishingCredits();
+    const amount = pack.amountUsd;
+    const creditsGranted = pack.credits;
     const userId = req.userId;
 
     const request = new paypal.orders.OrdersCreateRequest();
@@ -41,20 +56,20 @@ export async function createOrder(req, res, next) {
       intent: "CAPTURE",
       purchase_units: [
         {
-          description: "Go Live — Publish your site to placetopage.com",
+          description: `${pack.label} — ${creditsGranted} publish credit${creditsGranted !== 1 ? "s" : ""} on placetopage.com`,
           amount: {
             currency_code: "USD",
             value: amount.toFixed(2),
           },
-          reference_id: "go_live",
+          reference_id: productType,
         },
       ],
       application_context: {
         brand_name: "Place to Page",
         landing_page: "NO_PREFERENCE",
         user_action: "PAY_NOW",
-        return_url: `${FRONTEND_URL()}/generator?paypal=success`,
-        cancel_url: `${FRONTEND_URL()}/generator?paypal=cancelled`,
+        return_url: `${FRONTEND_URL()}/purchase-tokens?paypal=success`,
+        cancel_url: `${FRONTEND_URL()}/purchase-tokens?paypal=cancelled`,
       },
     });
 
@@ -66,7 +81,7 @@ export async function createOrder(req, res, next) {
       amount,
       currency: "USD",
       status: "created",
-      productType: "go_live",
+      productType,
       publishingCreditsGranted: creditsGranted,
       paypalResponse: order.result,
     });

@@ -80,7 +80,8 @@ Return ONLY a valid JSON object (no extra text):
   "heroHeadline": "6-10 word hero headline",
   "ctaText": "2-4 word CTA",
   "seoDescription": "140-160 char meta description",
-  "highlights": ["highlight 1", "highlight 2", "highlight 3"]
+  "highlights": ["highlight 1", "highlight 2", "highlight 3"],
+  "subdomainWords": "1-3 words space-separated, no hyphens, based on business name"
 }`,
       },
     ],

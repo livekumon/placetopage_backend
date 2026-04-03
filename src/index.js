@@ -7,7 +7,10 @@ import authRouter from "./routes/auth.js";
 import mapsRouter from "./routes/maps.js";
 import enrichRouter from "./routes/enrich.js";
 import paymentsRouter from "./routes/payments.js";
+import uploadRouter from "./routes/upload.js";
+import adminRouter from "./routes/admin.js";
 import { seedIfEmpty } from "./seed.js";
+import { promoteAdminUsers } from "./services/promoteAdmins.js";
 
 const PORT = Number(process.env.PORT) || 8080;
 const MONGODB_URI = process.env.MONGODB_URI || "mongodb://127.0.0.1:27017/placetowebsite";
@@ -30,6 +33,17 @@ app.use(
       // Allow requests with no origin (curl, Postman, server-to-server)
       if (!origin) return cb(null, true);
       if (corsOrigins.includes(origin)) return cb(null, true);
+      // Local dev: Vite may use localhost vs 127.0.0.1 or a different port; .env duplicates can drop one origin
+      if (!process.env.VERCEL && origin) {
+        try {
+          const { hostname } = new URL(origin);
+          if (hostname === "localhost" || hostname === "127.0.0.1") {
+            return cb(null, true);
+          }
+        } catch {
+          /* ignore */
+        }
+      }
       cb(new Error(`CORS: origin ${origin} not allowed`));
     },
     credentials: true,
@@ -39,9 +53,18 @@ app.use(
 app.use(express.json());
 
 // Ensure DB is connected before every request (safe for serverless cold starts)
+let adminPromoteDone = false;
 app.use(async (_req, _res, next) => {
   try {
     await connectDb(MONGODB_URI);
+    if (!adminPromoteDone) {
+      adminPromoteDone = true;
+      try {
+        await promoteAdminUsers();
+      } catch (e) {
+        console.error("promoteAdminUsers:", e);
+      }
+    }
     next();
   } catch (e) {
     next(e);
@@ -58,10 +81,12 @@ app.get("/api/paypal/client-id", (_req, res) => {
 });
 
 app.use("/api/auth", authRouter);
+app.use("/api/admin", adminRouter);
 app.use("/api/sites", sitesRouter);
 app.use("/api/maps", mapsRouter);
 app.use("/api/enrich", enrichRouter);
 app.use("/api/payments", paymentsRouter);
+app.use("/api/upload", uploadRouter);
 
 app.use((err, _req, res, _next) => {
   console.error(err);

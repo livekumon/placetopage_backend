@@ -5,9 +5,13 @@ import {
   captureOrder,
   getPaymentHistory,
   getPaymentById,
+  getTokenPacks,
 } from "../controllers/paymentController.js";
 
 const router = Router();
+
+// Public — no auth required to view available packs
+router.get("/token-packs", getTokenPacks);
 
 router.use(requireAuth);
 

@@ -23,21 +23,37 @@ const siteSchema = new mongoose.Schema(
         theme: { type: String, default: "light" },
         deploymentUrl: { type: String, default: null },
         vercelDeploymentId: { type: String, default: null },
+        vercelProjectId: { type: String, default: null },
         vercelProjectName: { type: String, default: null },
         generatedHtml: { type: String, default: null },
         placeData: { type: mongoose.Schema.Types.Mixed, default: null },
         // Slug-only portion of the custom domain, e.g. "biryani-blues"
         // Full URL = customSubdomain + "." + CUSTOM_DOMAIN_BASE
+        // Do not store null — MongoDB unique indexes count null as a value. Omit the field when unused.
         customSubdomain: {
           type: String,
-          default: null,
-          sparse: true,
-          unique: true,
           lowercase: true,
           trim: true,
         },
+        /** Set when user removes an archived site from the dashboard (row kept in DB) */
+        deletedAt: { type: Date, default: null, index: true },
   },
   { timestamps: true }
+);
+
+// Unique only for real substrings; many sites omit the field (no duplicate-null errors).
+siteSchema.index(
+  { customSubdomain: 1 },
+  {
+    unique: true,
+    partialFilterExpression: {
+      $and: [
+        { customSubdomain: { $exists: true } },
+        { customSubdomain: { $ne: null } },
+        { customSubdomain: { $ne: "" } },
+      ],
+    },
+  }
 );
 
 export const Site = mongoose.model("Site", siteSchema);

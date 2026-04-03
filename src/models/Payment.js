@@ -1,4 +1,5 @@
 import mongoose from "mongoose";
+import { VALID_PRODUCT_TYPES } from "../config/tokenPacks.js";
 
 const paymentSchema = new mongoose.Schema(
   {
@@ -26,7 +27,7 @@ const paymentSchema = new mongoose.Schema(
     },
     productType: {
       type: String,
-      enum: ["go_live"],
+      enum: VALID_PRODUCT_TYPES,
       default: "go_live",
       required: true,
     },

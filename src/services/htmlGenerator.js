@@ -113,18 +113,35 @@ export function generateSiteHtml({ name, theme = "light", placeData = {} }) {
     reviews = [],
     photoUrl = "",
     photos = [],
+    aboutPhotoUrl = "",
     mapsUrl = "",
     category = "Business",
+    /** Parallel to `reviews`: false = hidden. Legacy: `reviewsCustom` enabled flags. */
+    reviewsEnabled = null,
+    reviewsCustom = null,
+    footerCopyright = "",
+    footerAttribution = "",
+    showFooterAttribution = true,
   } = placeData;
 
-  // Normalise photos array — always include photoUrl as first item
+  // Normalise photos array — always include photoUrl as first item (cap at 20 for gallery + hero)
+  const MAX_PLACE_PHOTOS = 20;
   const allPhotos = [
     ...(photoUrl ? [photoUrl] : []),
     ...(photos || []).filter((p) => p && p !== photoUrl),
-  ].slice(0, 6);
+  ].slice(0, MAX_PLACE_PHOTOS);
 
   const heroPhoto = allPhotos[0] || "";
-  const galleryPhotos = allPhotos.slice(1); // up to 5 extra
+  const trimmedAbout = String(aboutPhotoUrl || "").trim();
+  const aboutImg =
+    trimmedAbout ||
+    allPhotos[1] ||
+    allPhotos[0] ||
+    "";
+
+  // Gallery: photos after hero, excluding the About image so it is not duplicated
+  let galleryPhotos = allPhotos.slice(1);
+  galleryPhotos = galleryPhotos.filter((u) => u && u !== aboutImg);
   const hasGallery = galleryPhotos.length > 0;
 
   const displayName = esc(name);
@@ -135,7 +152,7 @@ export function generateSiteHtml({ name, theme = "light", placeData = {} }) {
   const telHref = phone ? `tel:${phone.replace(/[\s()\-+]/g, "")}` : null;
 
   // ── Hero slideshow slides ─────────────────────────────────────────────────
-  const slideshowPhotos = allPhotos.slice(0, 4);
+  const slideshowPhotos = allPhotos.slice(0, Math.min(6, allPhotos.length));
   const slideDuration = 5; // seconds per slide
   const totalDuration = slideDuration * slideshowPhotos.length;
 
@@ -198,11 +215,34 @@ export function generateSiteHtml({ name, theme = "light", placeData = {} }) {
     `<tr><td class="hours-day">${esc(day)}</td><td class="hours-time">${esc(time)}</td></tr>`
   ).join("");
 
-  // ── Review cards ──────────────────────────────────────────────────────────
-  const reviewCards = (reviews || [])
-    .filter((r) => r?.text?.length > 10)
-    .slice(0, 6)
-    .map((r) => `
+  // ── Review cards: copy from Google `reviews`; visibility via `reviewsEnabled` (legacy: `reviewsCustom`) ─
+  const normalizeReviewEntry = (r) => ({
+    author: r?.author || "",
+    text: r?.text || "",
+    relativeTime: r?.relativeTime || "",
+    rating: r?.rating ?? 5,
+    authorPhoto: r?.authorPhoto || "",
+  });
+  const baseReviews = (reviews || []).map(normalizeReviewEntry);
+  let enabledAt = baseReviews.map(() => true);
+  if (Array.isArray(reviewsEnabled) && reviewsEnabled.length === baseReviews.length) {
+    enabledAt = reviewsEnabled.map((v) => v !== false);
+  } else if (Array.isArray(reviewsCustom) && reviewsCustom.length > 0) {
+    enabledAt = baseReviews.map((_, i) => reviewsCustom[i]?.enabled !== false);
+  }
+
+  const reviewCardsParts = [];
+  for (let i = 0; i < baseReviews.length; i++) {
+    if (reviewCardsParts.length >= 6) break;
+    const r = baseReviews[i];
+    if (!enabledAt[i]) continue;
+    const t = String(r.text || "").trim();
+    if (!t || t.length <= 10) continue;
+    reviewCardsParts.push({ r });
+  }
+
+  const reviewCardsHtml = reviewCardsParts
+    .map(({ r }) => `
     <article class="review-card" aria-label="Review by ${esc(r.author)}">
       <div class="review-header">
         ${r.authorPhoto
@@ -216,6 +256,15 @@ export function generateSiteHtml({ name, theme = "light", placeData = {} }) {
       </div>
       <p class="review-text">${esc(r.text)}</p>
     </article>`).join("");
+
+  const year = new Date().getFullYear();
+  const footerCopyDefault = `© ${year} ${name || "Site"}`;
+  const footerCopyRaw = String(footerCopyright || "").trim() || footerCopyDefault;
+  const footerCopyEscaped = esc(footerCopyRaw);
+  const attributionRaw =
+    String(footerAttribution ?? "").trim() || "Made with Place to Page";
+  const attributionEscaped = esc(attributionRaw);
+  const showAttrib = showFooterAttribution !== false;
 
   // ── Highlight items ───────────────────────────────────────────────────────
   const highlightItems = (highlights || []).map((h) => `
@@ -309,9 +358,16 @@ export function generateSiteHtml({ name, theme = "light", placeData = {} }) {
     }
     .nav.scrolled .nav-cta:hover { background: var(--primary-hover); transform: translateY(-1px); }
 
-    /* ── HERO ── */
+    /* ── HERO ── (one viewport tall; background never stretches with content) */
     .hero {
-      position: relative; min-height: 100svh; min-height: 100vh;
+      position: relative;
+      box-sizing: border-box;
+      min-height: 100vh;
+      height: 100vh;
+      max-height: 100vh;
+      min-height: 100svh;
+      height: 100svh;
+      max-height: 100svh;
       display: flex; align-items: flex-end;
       padding: 5rem 1.25rem 3.5rem;
       overflow: hidden;
@@ -344,6 +400,11 @@ export function generateSiteHtml({ name, theme = "light", placeData = {} }) {
     .hero-content {
       position: relative; z-index: 2;
       width: 100%; max-width: 760px;
+      flex-shrink: 1;
+      min-height: 0;
+      max-height: min(92vh, calc(100svh - 6rem));
+      overflow-y: auto;
+      -webkit-overflow-scrolling: touch;
     }
     .hero-badge {
       display: inline-flex; align-items: center; gap: 0.4rem;
@@ -728,7 +789,7 @@ export function generateSiteHtml({ name, theme = "light", placeData = {} }) {
     /* ── TABLET: 640px ── */
     @media (min-width: 640px) {
       .container { padding: 0 1.75rem; }
-      .hero { padding: 5.5rem 1.75rem 4rem; }
+      .hero { padding: 5.5rem 1.75rem 4rem; max-height: 100svh; height: 100svh; }
       .about-grid { grid-template-columns: 1fr 1fr; }
       .gallery-grid { grid-template-columns: repeat(3, 1fr); }
       .gallery-item--featured { grid-column: span 2; }
@@ -742,7 +803,7 @@ export function generateSiteHtml({ name, theme = "light", placeData = {} }) {
     @media (min-width: 1024px) {
       .container { padding: 0 2rem; }
       section { padding: 5rem 0; }
-      .hero { padding: 6rem 2rem 5rem; align-items: center; }
+      .hero { padding: 6rem 2rem 5rem; align-items: center; max-height: 100svh; height: 100svh; }
       .about-grid { gap: 4.5rem; }
       .gallery-grid { grid-template-columns: repeat(4, 1fr); }
       .gallery-item--featured { grid-column: span 2; }
@@ -777,22 +838,22 @@ export function generateSiteHtml({ name, theme = "light", placeData = {} }) {
 
   <!-- NAV -->
   <nav class="nav" role="navigation" aria-label="Main navigation">
-    <a class="nav-brand" href="#">${displayName}</a>
+    <a class="nav-brand" href="#" data-p2p-field="name">${displayName}</a>
     <div class="nav-right">
-      <a class="nav-cta" href="#contact">${esc(ctaText)}</a>
+      <a class="nav-cta" href="#contact" data-p2p-field="ctaText">${esc(ctaText)}</a>
     </div>
   </nav>
 
   <!-- HERO -->
-  <header class="hero" role="banner">
+  <header class="hero" role="banner" data-p2p-field="thumbnailUrl">
     ${slidesDivs}
     <div class="hero-overlay" aria-hidden="true"></div>
     <div class="hero-content">
-      <p class="hero-badge">${esc(category)}</p>
-      <h1>${heroText}</h1>
-      ${subText ? `<p class="hero-sub">${subText}</p>` : ""}
+      <p class="hero-badge" data-p2p-field="category">${esc(category)}</p>
+      <h1 data-p2p-field="heroHeadline">${heroText}</h1>
+      ${subText ? `<p class="hero-sub" data-p2p-field="tagline">${subText}</p>` : ""}
       <div class="hero-actions">
-        <a class="btn-hero-primary" href="#contact">${esc(ctaText)}</a>
+        <a class="btn-hero-primary" href="#contact" data-p2p-field="ctaText">${esc(ctaText)}</a>
         <a class="btn-hero-outline" href="${esc(mapsLink)}" target="_blank" rel="noopener noreferrer">
           📍 Get directions
         </a>
@@ -817,18 +878,16 @@ export function generateSiteHtml({ name, theme = "light", placeData = {} }) {
       <div class="about-grid">
         <div>
           <p class="section-label">About us</p>
-          <h2 class="section-title" id="about-heading">${displayName}</h2>
-          <p class="section-sub">${esc(description || tagline || "")}</p>
+          <h2 class="section-title" id="about-heading" data-p2p-field="name">${displayName}</h2>
+          <p class="section-sub" data-p2p-field="description">${esc(description || tagline || "")}</p>
           ${highlights?.length > 0 ? `
           <ul class="highlights-list" aria-label="Key highlights">
             ${highlightItems}
           </ul>` : ""}
         </div>
-        ${allPhotos[1]
-          ? `<img class="about-photo" src="${esc(allPhotos[1])}" alt="${displayName} interior" loading="lazy">`
-          : allPhotos[0]
-            ? `<img class="about-photo" src="${esc(allPhotos[0])}" alt="${displayName}" loading="lazy">`
-            : `<div class="about-photo-placeholder" aria-hidden="true">🏪</div>`}
+        ${aboutImg
+          ? `<img class="about-photo" src="${esc(aboutImg)}" alt="${displayName} — about us" loading="lazy" data-p2p-field="aboutPhotoUrl">`
+          : `<div class="about-photo-placeholder" aria-hidden="true" data-p2p-field="aboutPhotoUrl">🏪</div>`}
       </div>
     </div>
   </section>
@@ -840,7 +899,7 @@ export function generateSiteHtml({ name, theme = "light", placeData = {} }) {
   ${hasGallery ? '<hr class="divider">' : ""}
 
   <!-- REVIEWS -->
-  ${reviewCards ? `
+  ${reviewCardsHtml ? `
   <section class="reviews-section" aria-labelledby="reviews-heading">
     <div class="container">
       <p class="section-label">What customers say</p>
@@ -853,7 +912,7 @@ export function generateSiteHtml({ name, theme = "light", placeData = {} }) {
         </div>
       </div>` : `<h2 class="section-title" id="reviews-heading">Customer Reviews</h2>`}
       <div class="reviews-scroll" role="list">
-        ${reviewCards}
+        ${reviewCardsHtml}
       </div>
     </div>
   </section>
@@ -865,12 +924,12 @@ export function generateSiteHtml({ name, theme = "light", placeData = {} }) {
     <div class="container">
       <div class="cta-box">
         <p class="section-label">Come visit us</p>
-        <h2 class="section-title" id="cta-heading">Ready to experience ${displayName}?</h2>
-        ${address ? `<p class="section-sub">${esc(address)}</p>` : ""}
+        <h2 class="section-title" id="cta-heading" data-p2p-field="name">Ready to experience ${displayName}?</h2>
+        ${address ? `<p class="section-sub" data-p2p-field="mapsUrl">${esc(address)}</p>` : ""}
         <div class="cta-actions" style="margin-top:2rem">
           ${phone
-            ? `<a class="btn-primary" href="${esc(telHref)}">${esc(ctaText)}</a>`
-            : `<a class="btn-primary" href="${esc(mapsLink)}" target="_blank" rel="noopener noreferrer">${esc(ctaText)}</a>`}
+            ? `<a class="btn-primary" href="${esc(telHref)}" data-p2p-field="ctaText">${esc(ctaText)}</a>`
+            : `<a class="btn-primary" href="${esc(mapsLink)}" target="_blank" rel="noopener noreferrer" data-p2p-field="ctaText">${esc(ctaText)}</a>`}
           <a class="btn-secondary" href="${esc(mapsLink)}" target="_blank" rel="noopener noreferrer">
             View on Google Maps
           </a>
@@ -887,9 +946,9 @@ export function generateSiteHtml({ name, theme = "light", placeData = {} }) {
 
       <!-- Col 1: Brand -->
       <div class="footer-brand-col">
-        <h3 class="footer-name">${displayName}</h3>
+        <h3 class="footer-name" data-p2p-field="name">${displayName}</h3>
         ${tagline || description
-          ? `<p class="footer-tagline">${esc((tagline || description || "").slice(0, 100))}</p>`
+          ? `<p class="footer-tagline" data-p2p-field="tagline">${esc((tagline || description || "").slice(0, 100))}</p>`
           : ""}
         ${rating ? `
         <div class="footer-rating-chip">
@@ -903,19 +962,19 @@ export function generateSiteHtml({ name, theme = "light", placeData = {} }) {
         <p class="footer-col-heading">Find us</p>
         <ul class="footer-contact-list">
           ${address ? `
-          <li>
+          <li data-p2p-field="mapsUrl">
             <span class="footer-contact-icon">📍</span>
             <span class="footer-contact-text">
               <a href="${esc(mapsLink)}" target="_blank" rel="noopener noreferrer">${esc(address)}</a>
             </span>
           </li>` : ""}
           ${phone ? `
-          <li>
+          <li data-p2p-field="phone">
             <span class="footer-contact-icon">📞</span>
             <span class="footer-contact-text"><a href="${esc(telHref)}">${esc(phone)}</a></span>
           </li>` : ""}
           ${website ? `
-          <li>
+          <li data-p2p-field="website">
             <span class="footer-contact-icon">🌐</span>
             <span class="footer-contact-text">
               <a href="${esc(website)}" target="_blank" rel="noopener noreferrer">${esc(cleanWebsite)}</a>
@@ -940,11 +999,11 @@ export function generateSiteHtml({ name, theme = "light", placeData = {} }) {
 
     <!-- Bottom bar -->
     <div class="footer-bottom">
-      <p class="footer-copy">© ${new Date().getFullYear()} ${displayName}</p>
+      <p class="footer-copy" data-p2p-field="footerCopyright">${footerCopyEscaped}</p>
       <nav class="footer-bottom-links" aria-label="Footer links">
         ${mapsLink ? `<a href="${esc(mapsLink)}" target="_blank" rel="noopener noreferrer">Google Maps</a>` : ""}
         ${website ? `<a href="${esc(website)}" target="_blank" rel="noopener noreferrer">Website</a>` : ""}
-        <a href="#" style="color:var(--primary)">Made with Place to Page</a>
+        ${showAttrib ? `<a href="#" style="color:var(--primary)" data-p2p-field="footerAttribution">${attributionEscaped}</a>` : ""}
       </nav>
     </div>
 
