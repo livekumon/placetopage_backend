@@ -9,24 +9,11 @@ const PLACES_V1 = "https://places.googleapis.com/v1";
 
 // ── URL validation ────────────────────────────────────────────────────────────
 
-/**
- * Returns true for any URL format that Google uses to share map locations.
- * Kept intentionally broad so we attempt expansion/lookup rather than
- * rejecting valid but unfamiliar links outright.
- */
-function isGoogleMapsUrl(url) {
+/** Only require a parseable http(s) URL — actual Maps resolution is done via Places API. */
+function isValidHttpUrl(url) {
   try {
     const u = new URL(url);
-    const h = u.hostname.toLowerCase();
-    return (
-      h.startsWith("maps.google.")    ||  // maps.google.com / .co.in / .co.uk …
-      ((h === "www.google.com" || h === "google.com") &&
-        u.pathname.startsWith("/maps")) ||
-      (h === "goo.gl" && u.pathname.startsWith("/maps")) ||
-      h === "maps.app.goo.gl"         ||  // standard share link
-      h === "share.google"            ||  // new share.google/XXXXX format
-      h === "g.co"                        // Google's own short-domain
-    );
+    return u.protocol === "http:" || u.protocol === "https:";
   } catch {
     return false;
   }
@@ -97,12 +84,17 @@ async function expandShortUrl(shortUrl, maxHops = 6) {
 // ── Place ID extraction from URL ──────────────────────────────────────────────
 
 function extractPlaceId(url) {
-  // Full Maps URLs encode the ChIJ… place ID after "!1s" in the data fragment
-  const m = url.match(/!1s(ChIJ[^!&%]+)/);
-  if (m) return decodeURIComponent(m[1]);
+  // Full Maps URLs often encode the place ID after "!1s" in the data fragment (ChIJ… or hex)
+  const mChij = url.match(/!1s(ChIJ[^!&%]+)/);
+  if (mChij) return decodeURIComponent(mChij[1]);
+  const mHex = url.match(/!1s(0x[a-fA-F0-9]+)/);
+  if (mHex) return decodeURIComponent(mHex[1]);
   try {
-    const pid = new URL(url).searchParams.get("place_id");
+    const u = new URL(url);
+    const pid = u.searchParams.get("place_id");
     if (pid) return pid;
+    const ftid = u.searchParams.get("ftid");
+    if (ftid) return decodeURIComponent(ftid);
   } catch {}
   return null;
 }
@@ -142,14 +134,23 @@ async function placesApiFetch(path, apiKey, { method = "GET", body, fieldMask } 
   return res.json();
 }
 
-/** Text Search → returns the first matching place ID */
-async function findPlaceId(query, apiKey) {
-  const data = await placesApiFetch("/places:searchText", apiKey, {
-    method: "POST",
-    body: { textQuery: query },
-    fieldMask: "places.id",
-  });
-  return data.places?.[0]?.id ?? null;
+/**
+ * Text Search (New) — returns the first place ID, or null if nothing matches / API rejects query.
+ * We pass full pasted URLs here so Google can resolve share links without brittle regex.
+ */
+async function findPlaceIdFromText(textQuery, apiKey) {
+  const q = String(textQuery ?? "").trim();
+  if (!q) return null;
+  try {
+    const data = await placesApiFetch("/places:searchText", apiKey, {
+      method: "POST",
+      body: { textQuery: q },
+      fieldMask: "places.id",
+    });
+    return data.places?.[0]?.id ?? null;
+  } catch {
+    return null;
+  }
 }
 
 /** Place Details (New API) — all the fields we need */
@@ -174,8 +175,16 @@ const DETAIL_FIELD_MASK = [
   "reviews",
 ].join(",");
 
+/** Places API (New) returns `id` as `places/ChIJ…`; GET path must be `/v1/places/ChIJ…`. */
+function placeIdForPath(id) {
+  if (!id) return id;
+  const s = String(id);
+  return s.startsWith("places/") ? s.slice("places/".length) : s;
+}
+
 async function fetchPlaceDetails(placeId, apiKey) {
-  return placesApiFetch(`/places/${placeId}`, apiKey, { fieldMask: DETAIL_FIELD_MASK });
+  const pathId = encodeURIComponent(placeIdForPath(placeId));
+  return placesApiFetch(`/places/${pathId}`, apiKey, { fieldMask: DETAIL_FIELD_MASK });
 }
 
 /**
@@ -285,48 +294,63 @@ router.post("/lookup", requireAuth, async (req, res, next) => {
     url = url.trim();
     if (!/^https?:\/\//i.test(url)) url = "https://" + url;
 
-    if (!isGoogleMapsUrl(url)) {
-      return res.status(422).json({
-        code: "NOT_GOOGLE_MAPS",
-        message:
-          "That doesn't look like a Google Maps link. Open any business on maps.google.com and copy the URL from your browser's address bar.",
+    if (!isValidHttpUrl(url)) {
+      return res.status(400).json({
+        message: "Enter a valid web link (starting with http:// or https://).",
       });
     }
 
-    // Expand short / opaque links before parsing (goo.gl, maps.app.goo.gl,
-    // share.google, g.co — all redirect to the full canonical Maps URL).
+    const originalInput = url;
+
+    // Expand short / opaque links (goo.gl, maps.app.goo.gl, share.google, g.co).
+    let workingUrl = url;
     if (needsExpansion(url)) {
       const expanded = await expandShortUrl(url);
-      // After expansion, re-validate — the resolved URL must still be a Maps URL.
-      // If it's not (e.g. a generic google.com page), surface a clear error.
-      if (expanded !== url && !isGoogleMapsUrl(expanded)) {
-        return res.status(422).json({
-          code: "NOT_GOOGLE_MAPS",
-          message:
-            "That link didn't resolve to a Google Maps business page. Please open the business on Google Maps and copy the URL from the address bar.",
-        });
-      }
-      url = expanded;
+      if (expanded) workingUrl = expanded;
     }
 
-    // Try to extract the ChIJ… place ID directly from the URL
-    let placeId = extractPlaceId(url);
+    // 1) Parse place ID from URL when present
+    let placeId =
+      extractPlaceId(workingUrl) || extractPlaceId(originalInput);
 
-    // Fallback: search by business name from the URL path
+    // 2) Ask Places API with the full URL(s) — handles many share formats without regex
     if (!placeId) {
-      const name = extractPlaceName(url);
-      if (name) placeId = await findPlaceId(name, apiKey);
+      placeId = await findPlaceIdFromText(workingUrl, apiKey);
+    }
+    if (!placeId) {
+      placeId = await findPlaceIdFromText(originalInput, apiKey);
+    }
+
+    // 3) Path segment after /maps/place/…
+    if (!placeId) {
+      const nameFromPath =
+        extractPlaceName(workingUrl) || extractPlaceName(originalInput);
+      if (nameFromPath) {
+        placeId = await findPlaceIdFromText(nameFromPath, apiKey);
+      }
     }
 
     if (!placeId) {
       return res.status(422).json({
         code: "PLACE_NOT_FOUND",
         message:
-          "Could not identify the business from this link. Try copying the full URL directly from Google Maps while the business page is open.",
+          "We couldn't find a business for this link. Open the place in Google Maps, use Share, paste the link here, or copy the URL from the address bar on the business page.",
       });
     }
 
-    const place = await fetchPlaceDetails(placeId, apiKey);
+    let place;
+    try {
+      place = await fetchPlaceDetails(placeId, apiKey);
+    } catch (e) {
+      console.error("fetchPlaceDetails:", e);
+      return res.status(502).json({
+        code: "PLACES_API_ERROR",
+        message:
+          e?.message?.includes("Places API") && e.message.length < 500
+            ? e.message
+            : "Google could not load details for this place. Check your API key and billing, then try again.",
+      });
+    }
 
     // Resolve up to 20 photo URLs in parallel (server-side → key-free CDN URLs)
     const photoNames = (place.photos ?? []).slice(0, 20).map((p) => p.name).filter(Boolean);
@@ -345,8 +369,10 @@ router.post("/lookup", requireAuth, async (req, res, next) => {
       relativeTime: r.relativePublishTimeDescription ?? "",
     }));
 
+    const idOut = place.id ? placeIdForPath(place.id) : placeIdForPath(placeId);
+
     res.json({
-      placeId,
+      placeId: idOut,
       name: place.displayName?.text ?? "Unknown",
       address: place.formattedAddress ?? "",
       phone: place.nationalPhoneNumber || place.internationalPhoneNumber || null,
