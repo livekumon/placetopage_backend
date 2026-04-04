@@ -4,32 +4,22 @@ import { requireAuth } from "../middleware/auth.js";
 
 const router = Router();
 
-// Places API (New) base — completely separate from the legacy maps.googleapis.com API
 const PLACES_V1 = "https://places.googleapis.com/v1";
 
-// ── URL validation ────────────────────────────────────────────────────────────
-
-/** Only require a parseable http(s) URL — actual Maps resolution is done via Places API. */
-function isValidHttpUrl(url) {
-  try {
-    const u = new URL(url);
-    return u.protocol === "http:" || u.protocol === "https:";
-  } catch {
-    return false;
-  }
-}
+// ── Short-URL expander ────────────────────────────────────────────────────────
 
 /**
- * Returns true for URL formats that are short/opaque and need a redirect
- * chain to be resolved into a full Google Maps URL before we can parse them.
+ * Domains that require redirect-following before we can parse any place info.
+ * google.com/maps, maps.google.com etc. are NOT short — they already carry
+ * query params or path segments we can parse directly.
  */
-function needsExpansion(url) {
+function isShortUrl(url) {
   try {
     const h = new URL(url).hostname.toLowerCase();
     return (
-      h === "goo.gl"           ||
-      h === "maps.app.goo.gl"  ||
-      h === "share.google"     ||
+      h === "goo.gl" ||
+      h === "maps.app.goo.gl" ||
+      h === "share.google" ||
       h === "g.co"
     );
   } catch {
@@ -37,16 +27,16 @@ function needsExpansion(url) {
   }
 }
 
-// ── Short-URL expander — follows the full redirect chain ──────────────────────
-
-/** Follows a single HTTP redirect and returns the Location header, or null. */
 function followOneRedirect(url) {
   return new Promise((resolve) => {
     try {
       const req = https.get(url, { timeout: 8000 }, (res) => {
         res.resume();
-        if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-          // Location may be relative — resolve against the current URL
+        if (
+          res.statusCode >= 300 &&
+          res.statusCode < 400 &&
+          res.headers.location
+        ) {
           try {
             resolve(new URL(res.headers.location, url).href);
           } catch {
@@ -57,7 +47,10 @@ function followOneRedirect(url) {
         }
       });
       req.on("error", () => resolve(null));
-      req.on("timeout", () => { req.destroy(); resolve(null); });
+      req.on("timeout", () => {
+        req.destroy();
+        resolve(null);
+      });
     } catch {
       resolve(null);
     }
@@ -65,101 +58,141 @@ function followOneRedirect(url) {
 }
 
 /**
- * Follows a redirect chain up to `maxHops` times.
- * Stops early once we land on a URL that no longer redirects or that is
- * already a full Google Maps URL (no further expansion needed).
+ * Follow the redirect chain until no more redirects or maxHops reached.
+ * We keep following even past known Google Maps hosts because some
+ * chains go: maps.app.goo.gl → maps.google.com → www.google.com/maps.
  */
-async function expandShortUrl(shortUrl, maxHops = 6) {
+async function expandUrl(shortUrl, maxHops = 8) {
   let current = shortUrl;
   for (let i = 0; i < maxHops; i++) {
     const next = await followOneRedirect(current);
     if (!next || next === current) break;
     current = next;
-    // Once we've landed on a full maps URL, no need to keep following
-    if (!needsExpansion(current)) break;
+    if (!isShortUrl(current)) break;
   }
   return current;
 }
 
-// ── Place ID / ftid extraction from URL ───────────────────────────────────────
+// ── Signal extraction ─────────────────────────────────────────────────────────
 
 /**
- * Google Maps share links (maps.app.goo.gl) expand to URLs like:
- *   https://maps.google.com?ftid=0x3bcb98f1be30c36b:0x7aaee8e0cc8cbd99&entry=gps
- * The `ftid` is a hex node:face pair — NOT a ChIJ place ID.
- * The second hex is the CID (decimal) used by the legacy Places API.
+ * Extract every useful signal from a URL without assuming which format it is.
+ * Signals are tried in reliability order by resolveToPlaceId().
+ *
+ * Handles all known Google Maps URL formats:
+ *
+ *  Share links (after expansion):
+ *    https://maps.google.com?ftid=0xNODE:0xFACE&entry=gps          ← hex ftid
+ *    https://www.google.com/maps?ftid=ChIJ...                       ← ChIJ ftid (rare)
+ *
+ *  Desktop / browser address bar:
+ *    https://www.google.com/maps/place/Name/@lat,lng,zoom/data=!4m...!1sChIJ...
+ *    https://www.google.com/maps/place/Name/@lat,lng,zoom            ← no data fragment
+ *    https://www.google.com/maps/place/Name/
+ *
+ *  CID links:
+ *    https://www.google.com/maps?cid=1234567890
+ *
+ *  Search / query links:
+ *    https://www.google.com/maps?q=Business+Name
+ *    https://www.google.com/maps?q=lat,lng
+ *    https://www.google.com/maps/search/Business+Name
+ *
+ *  Coordinate-only (map view — no specific business):
+ *    https://www.google.com/maps/@lat,lng,zoom
+ *    https://www.google.com/maps?ll=lat,lng
  */
-function hexFtidToCid(ftid) {
-  const m = ftid && String(ftid).match(/^0x[a-fA-F0-9]+:0x([a-fA-F0-9]+)$/i);
-  if (!m) return null;
-  try {
-    return BigInt(`0x${m[1]}`).toString(10);
-  } catch {
-    return null;
+function extractSignals(url) {
+  const signals = {
+    chijPlaceId: null,  // Direct ChIJ… → fetchPlaceDetails
+    cid: null,          // Decimal CID  → findPlaceIdByCid (legacy)
+    hexFtid: null,      // 0xNODE:0xFACE → hexFtidToCid → findPlaceIdByCid
+    coordinates: null,  // { lat, lng }  → searchText with locationBias
+    placeName: null,    // From /place/NAME/ or /search/NAME
+    searchQuery: null,  // From q= param (non-coordinate)
+  };
+
+  // ChIJ place ID from !1s data fragment (desktop URLs)
+  const mChij = url.match(/!1s(ChIJ[^!&%\s]+)/);
+  if (mChij) {
+    try { signals.chijPlaceId = decodeURIComponent(mChij[1]); } catch {}
   }
-}
 
-/**
- * Legacy Places API: resolve a numeric CID → ChIJ place_id.
- * The New Places API (v1) does not accept hex ftid or CID directly.
- */
-async function findPlaceIdByCid(cid, apiKey) {
-  try {
-    const res = await fetch(
-      `https://maps.googleapis.com/maps/api/place/details/json?cid=${encodeURIComponent(cid)}&fields=place_id&key=${apiKey}`
-    );
-    if (!res.ok) return null;
-    const j = await res.json();
-    return j?.result?.place_id ?? null;
-  } catch {
-    return null;
+  // Coordinates from @lat,lng in the path
+  const mAt = url.match(/@(-?\d{1,3}\.\d+),(-?\d{1,3}\.\d+)/);
+  if (mAt) {
+    signals.coordinates = {
+      lat: parseFloat(mAt[1]),
+      lng: parseFloat(mAt[2]),
+    };
   }
-}
 
-/**
- * Extract ChIJ place ID directly from a URL when present.
- * Returns null for hex ftid pairs — those need CID resolution (see caller).
- */
-function extractPlaceId(url) {
-  // Full Maps desktop URLs encode ChIJ place ID after "!1s"
-  const mChij = url.match(/!1s(ChIJ[^!&%]+)/);
-  if (mChij) return decodeURIComponent(mChij[1]);
   try {
     const u = new URL(url);
+
+    // place_id= query param (explicit place ID, very reliable)
     const pid = u.searchParams.get("place_id");
-    if (pid) return pid;
-    // ftid can be a ChIJ string OR a hex pair — only return ChIJ here;
-    // hex pairs are handled separately via hexFtidToCid / findPlaceIdByCid.
+    if (pid && !signals.chijPlaceId) signals.chijPlaceId = pid;
+
+    // ftid= — either ChIJ or hex node:face pair
     const ftid = u.searchParams.get("ftid");
-    if (ftid && !ftid.startsWith("0x")) return decodeURIComponent(ftid);
+    if (ftid) {
+      if (/^0x[a-fA-F0-9]+:0x[a-fA-F0-9]+$/i.test(ftid)) {
+        signals.hexFtid = ftid;
+      } else if (!signals.chijPlaceId) {
+        try { signals.chijPlaceId = decodeURIComponent(ftid); } catch {}
+      }
+    }
+
+    // cid= decimal CID (e.g. ?cid=8840259170776956313)
+    const cid = u.searchParams.get("cid");
+    if (cid && /^\d+$/.test(cid)) signals.cid = cid;
+
+    // ll= coordinates
+    const ll = u.searchParams.get("ll");
+    if (ll && !signals.coordinates) {
+      const mLl = ll.match(/^(-?\d{1,3}\.\d+),(-?\d{1,3}\.\d+)$/);
+      if (mLl) {
+        signals.coordinates = {
+          lat: parseFloat(mLl[1]),
+          lng: parseFloat(mLl[2]),
+        };
+      }
+    }
+
+    // q= — either a lat,lng pair or a text query
+    const q = u.searchParams.get("q");
+    if (q) {
+      const mQ = q.match(/^(-?\d{1,3}\.\d+),(-?\d{1,3}\.\d+)$/);
+      if (mQ && !signals.coordinates) {
+        signals.coordinates = {
+          lat: parseFloat(mQ[1]),
+          lng: parseFloat(mQ[2]),
+        };
+      } else if (!mQ) {
+        signals.searchQuery = q;
+      }
+    }
+
+    // Business name from /maps/place/NAME/ or /maps/search/NAME
+    const namePath =
+      u.pathname.match(/\/maps\/place\/([^/@+][^/@]*?)(?:\/|$)/) ||
+      u.pathname.match(/\/maps\/search\/([^/@+][^/@]*?)(?:\/|$)/);
+    if (namePath) {
+      try {
+        signals.placeName = decodeURIComponent(
+          namePath[1].replace(/\+/g, " ")
+        ).trim();
+        if (!signals.placeName) signals.placeName = null;
+      } catch {}
+    }
   } catch {}
-  return null;
+
+  return signals;
 }
 
-/** Extract ftid query param regardless of format (hex pair or ChIJ). */
-function extractFtid(url) {
-  try {
-    return new URL(url).searchParams.get("ftid") ?? null;
-  } catch {
-    return null;
-  }
-}
+// ── Places API helpers ────────────────────────────────────────────────────────
 
-function extractPlaceName(url) {
-  try {
-    const m = new URL(url).pathname.match(/\/maps\/place\/([^/]+)/);
-    if (m) return decodeURIComponent(m[1].replace(/\+/g, " "));
-  } catch {}
-  return null;
-}
-
-// ── Places API (New) helpers ──────────────────────────────────────────────────
-
-/**
- * Generic fetch to the New Places API.
- * Auth is via the X-Goog-Api-Key header (not a ?key= query param).
- * Field selections go in X-Goog-FieldMask.
- */
 async function placesApiFetch(path, apiKey, { method = "GET", body, fieldMask } = {}) {
   const headers = {
     "X-Goog-Api-Key": apiKey,
@@ -181,25 +214,126 @@ async function placesApiFetch(path, apiKey, { method = "GET", body, fieldMask } 
 }
 
 /**
- * Text Search (New) — returns the first place ID, or null if nothing matches / API rejects query.
- * We pass full pasted URLs here so Google can resolve share links without brittle regex.
+ * Text Search → first matching place ID, or null.
+ * Used for business-name and search-query signals.
  */
-async function findPlaceIdFromText(textQuery, apiKey) {
+async function findPlaceIdFromText(textQuery, apiKey, locationBias = null) {
   const q = String(textQuery ?? "").trim();
   if (!q) return null;
   try {
+    const body = { textQuery: q, maxResultCount: 1 };
+    if (locationBias) body.locationBias = locationBias;
     const data = await placesApiFetch("/places:searchText", apiKey, {
       method: "POST",
-      body: { textQuery: q },
+      body,
       fieldMask: "places.id",
     });
-    return data.places?.[0]?.id ?? null;
+    const id = data.places?.[0]?.id ?? null;
+    return id ? placeIdForPath(id) : null;
   } catch {
     return null;
   }
 }
 
-/** Place Details (New API) — all the fields we need */
+/**
+ * Legacy Places API: CID (decimal) → ChIJ place_id.
+ * The New Places API does not accept CIDs or hex ftid values.
+ */
+async function findPlaceIdByCid(cid, apiKey) {
+  try {
+    const res = await fetch(
+      `https://maps.googleapis.com/maps/api/place/details/json?cid=${encodeURIComponent(cid)}&fields=place_id&key=${apiKey}`
+    );
+    if (!res.ok) return null;
+    const j = await res.json();
+    return j?.result?.place_id ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Convert hex ftid (0xNODE:0xFACE) to decimal CID.
+ * The CID is the unsigned decimal of the second (face) hex component.
+ */
+function hexFtidToCid(ftid) {
+  const m =
+    ftid && String(ftid).match(/^0x[a-fA-F0-9]+:0x([a-fA-F0-9]+)$/i);
+  if (!m) return null;
+  try {
+    return BigInt(`0x${m[1]}`).toString(10);
+  } catch {
+    return null;
+  }
+}
+
+/** Strip the `places/` prefix that the New Places API returns on `id` fields. */
+function placeIdForPath(id) {
+  if (!id) return id;
+  const s = String(id);
+  return s.startsWith("places/") ? s.slice("places/".length) : s;
+}
+
+/**
+ * Resolve a set of extracted signals to a canonical ChIJ place ID.
+ *
+ * Resolution order (most → least reliable):
+ *   1. ChIJ directly in URL (!1s fragment, place_id=, non-hex ftid=)
+ *   2. Decimal CID (cid= param) → legacy Places API
+ *   3. Hex ftid (0xNODE:0xFACE) → CID → legacy Places API
+ *   4. Business name + coordinates → searchText with locationBias (tight 200m)
+ *   5. Business name + coordinates → searchText with locationBias (wider 2km)
+ *   6. Business name alone → searchText
+ *   7. Search query (q=) → searchText
+ */
+async function resolveToPlaceId(signals, apiKey) {
+  // 1. Direct ChIJ
+  if (signals.chijPlaceId) return signals.chijPlaceId;
+
+  // 2. CID → legacy Places API
+  if (signals.cid) {
+    const pid = await findPlaceIdByCid(signals.cid, apiKey);
+    if (pid) return pid;
+  }
+
+  // 3. Hex ftid → CID → legacy Places API
+  if (signals.hexFtid) {
+    const cid = hexFtidToCid(signals.hexFtid);
+    if (cid) {
+      const pid = await findPlaceIdByCid(cid, apiKey);
+      if (pid) return pid;
+    }
+  }
+
+  // 4 & 5. Name + coordinates → searchText with location bias (tight then wide)
+  if (signals.placeName && signals.coordinates) {
+    const { lat, lng } = signals.coordinates;
+    const center = { latitude: lat, longitude: lng };
+    for (const radius of [200, 2000]) {
+      const pid = await findPlaceIdFromText(signals.placeName, apiKey, {
+        circle: { center, radius },
+      });
+      if (pid) return pid;
+    }
+  }
+
+  // 6. Name alone → searchText
+  if (signals.placeName) {
+    const pid = await findPlaceIdFromText(signals.placeName, apiKey);
+    if (pid) return pid;
+  }
+
+  // 7. Search query (q= param) → searchText
+  if (signals.searchQuery) {
+    const pid = await findPlaceIdFromText(signals.searchQuery, apiKey);
+    if (pid) return pid;
+  }
+
+  return null;
+}
+
+// ── Place details ─────────────────────────────────────────────────────────────
+
 const DETAIL_FIELD_MASK = [
   "id",
   "displayName",
@@ -221,43 +355,36 @@ const DETAIL_FIELD_MASK = [
   "reviews",
 ].join(",");
 
-/** Places API (New) returns `id` as `places/ChIJ…`; GET path must be `/v1/places/ChIJ…`. */
-function placeIdForPath(id) {
-  if (!id) return id;
-  const s = String(id);
-  return s.startsWith("places/") ? s.slice("places/".length) : s;
-}
-
 async function fetchPlaceDetails(placeId, apiKey) {
   const pathId = encodeURIComponent(placeIdForPath(placeId));
-  return placesApiFetch(`/places/${pathId}`, apiKey, { fieldMask: DETAIL_FIELD_MASK });
+  return placesApiFetch(`/places/${pathId}`, apiKey, {
+    fieldMask: DETAIL_FIELD_MASK,
+  });
 }
 
-/**
- * Photo serving — New API redirects to a key-free Google CDN URL.
- * We follow the redirect server-side so the raw API key is never returned
- * to the browser.
- */
 function resolvePhotoUrl(photoName, apiKey) {
   const apiUrl = `${PLACES_V1}/${photoName}/media?maxWidthPx=1200&key=${apiKey}&skipHttpRedirect=false`;
   return new Promise((resolve) => {
     const req = https.get(apiUrl, { timeout: 8000 }, (res) => {
       res.resume();
-      if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-        resolve(res.headers.location); // key-free Google CDN URL
+      if (
+        res.statusCode >= 300 &&
+        res.statusCode < 400 &&
+        res.headers.location
+      ) {
+        resolve(res.headers.location);
       } else {
-        resolve(apiUrl); // fallback — includes key, but better than no photo
+        resolve(apiUrl);
       }
     });
     req.on("error", () => resolve(null));
-    req.on("timeout", () => { req.destroy(); resolve(null); });
+    req.on("timeout", () => {
+      req.destroy();
+      resolve(null);
+    });
   });
 }
 
-/**
- * The New API returns priceLevel as a string enum.
- * Convert to the 0-3 numeric scale used by the frontend.
- */
 function parsePriceLevel(level) {
   const map = {
     PRICE_LEVEL_FREE: 0,
@@ -268,8 +395,6 @@ function parsePriceLevel(level) {
   };
   return map[level] ?? null;
 }
-
-// ── Missing-fields detection ──────────────────────────────────────────────────
 
 function detectMissingFields(place) {
   const fields = [];
@@ -308,7 +433,6 @@ function detectMissingFields(place) {
     });
   }
 
-  // Tagline is almost never in Google Maps — always ask
   fields.push({
     id: "tagline",
     label: "Your tagline or slogan",
@@ -340,39 +464,46 @@ router.post("/lookup", requireAuth, async (req, res, next) => {
     url = url.trim();
     if (!/^https?:\/\//i.test(url)) url = "https://" + url;
 
-    if (!isValidHttpUrl(url)) {
-      return res.status(400).json({
-        message: "Enter a valid web link (starting with http:// or https://).",
-      });
+    try {
+      new URL(url);
+    } catch {
+      return res
+        .status(400)
+        .json({ message: "Enter a valid link (http or https)." });
     }
 
+    // ── Step 1: expand short/redirect URLs ───────────────────────────────────
     const originalInput = url;
-
-    // Expand short / opaque links (goo.gl, maps.app.goo.gl, share.google, g.co).
     let workingUrl = url;
-    if (needsExpansion(url)) {
-      const expanded = await expandShortUrl(url);
+    if (isShortUrl(url)) {
+      const expanded = await expandUrl(url);
       if (expanded) workingUrl = expanded;
     }
 
-    // 1) Parse ChIJ place ID directly from URL
-    let placeId =
-      extractPlaceId(workingUrl) || extractPlaceId(originalInput);
+    console.log("[maps/lookup] input:", originalInput.slice(0, 120));
+    console.log("[maps/lookup] working:", workingUrl.slice(0, 120));
 
-    // 2) Resolve hex ftid (e.g. 0xNODE:0xFACE from maps.app.goo.gl share links)
-    //    → convert second hex to CID → legacy Places API → ChIJ place_id
-    if (!placeId) {
-      const ftid =
-        extractFtid(workingUrl) || extractFtid(originalInput);
-      if (ftid) {
-        const cid = hexFtidToCid(ftid);
-        if (cid) {
-          placeId = await findPlaceIdByCid(cid, apiKey);
-        }
-      }
-    }
+    // ── Step 2: extract signals from both URL variants ───────────────────────
+    const sigA = extractSignals(workingUrl);
+    const sigB = extractSignals(originalInput);
 
-    // 3) Ask Places searchText with the expanded/original URL
+    // Merge: prefer workingUrl signals, fall back to originalInput
+    const signals = {
+      chijPlaceId: sigA.chijPlaceId || sigB.chijPlaceId,
+      cid:         sigA.cid         || sigB.cid,
+      hexFtid:     sigA.hexFtid     || sigB.hexFtid,
+      coordinates: sigA.coordinates || sigB.coordinates,
+      placeName:   sigA.placeName   || sigB.placeName,
+      searchQuery: sigA.searchQuery || sigB.searchQuery,
+    };
+
+    console.log("[maps/lookup] signals:", JSON.stringify(signals));
+
+    // ── Step 3: resolve signals → ChIJ place ID ──────────────────────────────
+    let placeId = await resolveToPlaceId(signals, apiKey);
+
+    // Last-resort: send the full URL text to searchText
+    // (handles some cases where Google's own API understands the URL)
     if (!placeId) {
       placeId = await findPlaceIdFromText(workingUrl, apiKey);
     }
@@ -380,28 +511,20 @@ router.post("/lookup", requireAuth, async (req, res, next) => {
       placeId = await findPlaceIdFromText(originalInput, apiKey);
     }
 
-    // 4) Path segment after /maps/place/…
-    if (!placeId) {
-      const nameFromPath =
-        extractPlaceName(workingUrl) || extractPlaceName(originalInput);
-      if (nameFromPath) {
-        placeId = await findPlaceIdFromText(nameFromPath, apiKey);
-      }
-    }
-
     if (!placeId) {
       return res.status(422).json({
         code: "PLACE_NOT_FOUND",
         message:
-          "We couldn't find a business for this link. Open the place in Google Maps, use Share, paste the link here, or copy the URL from the address bar on the business page.",
+          "We couldn't find a business for this link. Try opening Google Maps, tapping Share on the business, and pasting that link here.",
       });
     }
 
+    // ── Step 4: fetch full place details ─────────────────────────────────────
     let place;
     try {
       place = await fetchPlaceDetails(placeId, apiKey);
     } catch (e) {
-      console.error("fetchPlaceDetails:", e);
+      console.error("[maps/lookup] fetchPlaceDetails error:", e.message);
       return res.status(502).json({
         code: "PLACES_API_ERROR",
         message:
@@ -411,15 +534,16 @@ router.post("/lookup", requireAuth, async (req, res, next) => {
       });
     }
 
-    // Resolve up to 20 photo URLs in parallel (server-side → key-free CDN URLs)
-    const photoNames = (place.photos ?? []).slice(0, 20).map((p) => p.name).filter(Boolean);
+    // ── Step 5: resolve photos ────────────────────────────────────────────────
+    const photoNames = (place.photos ?? [])
+      .slice(0, 20)
+      .map((p) => p.name)
+      .filter(Boolean);
     const resolvedPhotos = await Promise.all(
       photoNames.map((name) => resolvePhotoUrl(name, apiKey))
     );
     const photos = resolvedPhotos.filter(Boolean);
-    const photoUrl = photos[0] ?? null;
 
-    // Normalise the Google reviews into a clean shape
     const reviews = (place.reviews ?? []).map((r) => ({
       author: r.authorAttribution?.displayName ?? "Anonymous",
       authorPhoto: r.authorAttribution?.photoUri ?? null,
@@ -430,11 +554,12 @@ router.post("/lookup", requireAuth, async (req, res, next) => {
 
     const idOut = place.id ? placeIdForPath(place.id) : placeIdForPath(placeId);
 
-    res.json({
+    return res.json({
       placeId: idOut,
       name: place.displayName?.text ?? "Unknown",
       address: place.formattedAddress ?? "",
-      phone: place.nationalPhoneNumber || place.internationalPhoneNumber || null,
+      phone:
+        place.nationalPhoneNumber || place.internationalPhoneNumber || null,
       website: place.websiteUri || null,
       rating: place.rating ?? null,
       reviewCount: place.userRatingCount ?? 0,
@@ -446,7 +571,7 @@ router.post("/lookup", requireAuth, async (req, res, next) => {
         null,
       isOpenNow: place.currentOpeningHours?.openNow ?? null,
       description: place.editorialSummary?.text ?? null,
-      photoUrl,
+      photoUrl: photos[0] ?? null,
       photos,
       location: place.location ?? null,
       mapsUrl: place.googleMapsUri || url,
