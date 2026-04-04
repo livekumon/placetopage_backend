@@ -81,22 +81,68 @@ async function expandShortUrl(shortUrl, maxHops = 6) {
   return current;
 }
 
-// ── Place ID extraction from URL ──────────────────────────────────────────────
+// ── Place ID / ftid extraction from URL ───────────────────────────────────────
 
+/**
+ * Google Maps share links (maps.app.goo.gl) expand to URLs like:
+ *   https://maps.google.com?ftid=0x3bcb98f1be30c36b:0x7aaee8e0cc8cbd99&entry=gps
+ * The `ftid` is a hex node:face pair — NOT a ChIJ place ID.
+ * The second hex is the CID (decimal) used by the legacy Places API.
+ */
+function hexFtidToCid(ftid) {
+  const m = ftid && String(ftid).match(/^0x[a-fA-F0-9]+:0x([a-fA-F0-9]+)$/i);
+  if (!m) return null;
+  try {
+    return BigInt(`0x${m[1]}`).toString(10);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Legacy Places API: resolve a numeric CID → ChIJ place_id.
+ * The New Places API (v1) does not accept hex ftid or CID directly.
+ */
+async function findPlaceIdByCid(cid, apiKey) {
+  try {
+    const res = await fetch(
+      `https://maps.googleapis.com/maps/api/place/details/json?cid=${encodeURIComponent(cid)}&fields=place_id&key=${apiKey}`
+    );
+    if (!res.ok) return null;
+    const j = await res.json();
+    return j?.result?.place_id ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Extract ChIJ place ID directly from a URL when present.
+ * Returns null for hex ftid pairs — those need CID resolution (see caller).
+ */
 function extractPlaceId(url) {
-  // Full Maps URLs often encode the place ID after "!1s" in the data fragment (ChIJ… or hex)
+  // Full Maps desktop URLs encode ChIJ place ID after "!1s"
   const mChij = url.match(/!1s(ChIJ[^!&%]+)/);
   if (mChij) return decodeURIComponent(mChij[1]);
-  const mHex = url.match(/!1s(0x[a-fA-F0-9]+)/);
-  if (mHex) return decodeURIComponent(mHex[1]);
   try {
     const u = new URL(url);
     const pid = u.searchParams.get("place_id");
     if (pid) return pid;
+    // ftid can be a ChIJ string OR a hex pair — only return ChIJ here;
+    // hex pairs are handled separately via hexFtidToCid / findPlaceIdByCid.
     const ftid = u.searchParams.get("ftid");
-    if (ftid) return decodeURIComponent(ftid);
+    if (ftid && !ftid.startsWith("0x")) return decodeURIComponent(ftid);
   } catch {}
   return null;
+}
+
+/** Extract ftid query param regardless of format (hex pair or ChIJ). */
+function extractFtid(url) {
+  try {
+    return new URL(url).searchParams.get("ftid") ?? null;
+  } catch {
+    return null;
+  }
 }
 
 function extractPlaceName(url) {
@@ -309,11 +355,24 @@ router.post("/lookup", requireAuth, async (req, res, next) => {
       if (expanded) workingUrl = expanded;
     }
 
-    // 1) Parse place ID from URL when present
+    // 1) Parse ChIJ place ID directly from URL
     let placeId =
       extractPlaceId(workingUrl) || extractPlaceId(originalInput);
 
-    // 2) Ask Places API with the full URL(s) — handles many share formats without regex
+    // 2) Resolve hex ftid (e.g. 0xNODE:0xFACE from maps.app.goo.gl share links)
+    //    → convert second hex to CID → legacy Places API → ChIJ place_id
+    if (!placeId) {
+      const ftid =
+        extractFtid(workingUrl) || extractFtid(originalInput);
+      if (ftid) {
+        const cid = hexFtidToCid(ftid);
+        if (cid) {
+          placeId = await findPlaceIdByCid(cid, apiKey);
+        }
+      }
+    }
+
+    // 3) Ask Places searchText with the expanded/original URL
     if (!placeId) {
       placeId = await findPlaceIdFromText(workingUrl, apiKey);
     }
@@ -321,7 +380,7 @@ router.post("/lookup", requireAuth, async (req, res, next) => {
       placeId = await findPlaceIdFromText(originalInput, apiKey);
     }
 
-    // 3) Path segment after /maps/place/…
+    // 4) Path segment after /maps/place/…
     if (!placeId) {
       const nameFromPath =
         extractPlaceName(workingUrl) || extractPlaceName(originalInput);
