@@ -1,31 +1,58 @@
 import { Router } from "express";
 import https from "https";
 import { requireAuth } from "../middleware/auth.js";
+import { resolveUrlViaBrowser } from "../utils/browserResolver.js";
 
 const router = Router();
 
 const PLACES_V1 = "https://places.googleapis.com/v1";
 
-// ── Short-URL expander ────────────────────────────────────────────────────────
+// ── Short-URL / redirect detection ───────────────────────────────────────────
 
 /**
- * Domains that require redirect-following before we can parse any place info.
- * google.com/maps, maps.google.com etc. are NOT short — they already carry
- * query params or path segments we can parse directly.
+ * Domains whose URLs are opaque tokens that must be expanded
+ * (via HTTP redirects or headless browser) before any parsing.
  */
-function isShortUrl(url) {
+function isShortOrOpaqueUrl(url) {
   try {
-    const h = new URL(url).hostname.toLowerCase();
+    const u = new URL(url);
+    const h = u.hostname.toLowerCase();
     return (
       h === "goo.gl" ||
       h === "maps.app.goo.gl" ||
       h === "share.google" ||
-      h === "g.co"
+      h === "g.co" ||
+      h === "g.page" ||
+      h.endsWith(".g.page") ||
+      (h === "www.google.com" && u.pathname === "/share.google")
     );
   } catch {
     return false;
   }
 }
+
+/**
+ * Returns true when the URL is a Google Maps page we can parse directly
+ * (has a /maps path, or is maps.google.* domain, etc.).
+ */
+function isMapsPageUrl(url) {
+  try {
+    const u = new URL(url);
+    const h = u.hostname.toLowerCase();
+    return (
+      u.pathname.startsWith("/maps") ||
+      h === "maps.google.com" ||
+      h.startsWith("maps.google.") ||
+      u.searchParams.has("ftid") ||
+      u.searchParams.has("cid") ||
+      u.searchParams.has("place_id")
+    );
+  } catch {
+    return false;
+  }
+}
+
+// ── HTTP redirect follower ───────────────────────────────────────────────────
 
 function followOneRedirect(url) {
   return new Promise((resolve) => {
@@ -58,9 +85,8 @@ function followOneRedirect(url) {
 }
 
 /**
- * Follow the redirect chain until no more redirects or maxHops reached.
- * We keep following even past known Google Maps hosts because some
- * chains go: maps.app.goo.gl → maps.google.com → www.google.com/maps.
+ * Follow HTTP 3xx redirect chain until it settles (maxHops or no more redirects).
+ * Does NOT handle JavaScript-based redirects — use resolveUrlViaBrowser for that.
  */
 async function expandUrl(shortUrl, maxHops = 8) {
   let current = shortUrl;
@@ -68,54 +94,54 @@ async function expandUrl(shortUrl, maxHops = 8) {
     const next = await followOneRedirect(current);
     if (!next || next === current) break;
     current = next;
-    if (!isShortUrl(current)) break;
   }
   return current;
 }
 
-// ── Signal extraction ─────────────────────────────────────────────────────────
+// ── Signal extraction ────────────────────────────────────────────────────────
 
 /**
  * Extract every useful signal from a URL without assuming which format it is.
- * Signals are tried in reliability order by resolveToPlaceId().
  *
  * Handles all known Google Maps URL formats:
  *
  *  Share links (after expansion):
- *    https://maps.google.com?ftid=0xNODE:0xFACE&entry=gps          ← hex ftid
- *    https://www.google.com/maps?ftid=ChIJ...                       ← ChIJ ftid (rare)
+ *    maps.google.com?ftid=0xNODE:0xFACE&entry=gps          ← hex ftid
+ *    www.google.com/maps?ftid=ChIJ...                       ← ChIJ ftid (rare)
  *
  *  Desktop / browser address bar:
- *    https://www.google.com/maps/place/Name/@lat,lng,zoom/data=!4m...!1sChIJ...
- *    https://www.google.com/maps/place/Name/@lat,lng,zoom            ← no data fragment
- *    https://www.google.com/maps/place/Name/
+ *    www.google.com/maps/place/Name/@lat,lng,zoom/data=!...!1sChIJ...
+ *    www.google.com/maps/place/Name/@lat,lng,zoom
+ *    www.google.com/maps/place/Name/
  *
  *  CID links:
- *    https://www.google.com/maps?cid=1234567890
+ *    www.google.com/maps?cid=1234567890
  *
  *  Search / query links:
- *    https://www.google.com/maps?q=Business+Name
- *    https://www.google.com/maps?q=lat,lng
- *    https://www.google.com/maps/search/Business+Name
+ *    www.google.com/maps?q=Business+Name
+ *    www.google.com/maps/search/Business+Name
  *
- *  Coordinate-only (map view — no specific business):
- *    https://www.google.com/maps/@lat,lng,zoom
- *    https://www.google.com/maps?ll=lat,lng
+ *  Coordinate-only:
+ *    www.google.com/maps/@lat,lng,zoom
+ *    www.google.com/maps?ll=lat,lng
  */
 function extractSignals(url) {
   const signals = {
-    chijPlaceId: null,  // Direct ChIJ… → fetchPlaceDetails
-    cid: null,          // Decimal CID  → findPlaceIdByCid (legacy)
-    hexFtid: null,      // 0xNODE:0xFACE → hexFtidToCid → findPlaceIdByCid
-    coordinates: null,  // { lat, lng }  → searchText with locationBias
-    placeName: null,    // From /place/NAME/ or /search/NAME
-    searchQuery: null,  // From q= param (non-coordinate)
+    chijPlaceId: null,
+    cid: null,
+    hexFtid: null,
+    kgmid: null,          // Knowledge Graph machine ID (e.g. /g/11p779tntx)
+    coordinates: null,
+    placeName: null,
+    searchQuery: null,
   };
 
   // ChIJ place ID from !1s data fragment (desktop URLs)
   const mChij = url.match(/!1s(ChIJ[^!&%\s]+)/);
   if (mChij) {
-    try { signals.chijPlaceId = decodeURIComponent(mChij[1]); } catch {}
+    try {
+      signals.chijPlaceId = decodeURIComponent(mChij[1]);
+    } catch {}
   }
 
   // Coordinates from @lat,lng in the path
@@ -130,7 +156,7 @@ function extractSignals(url) {
   try {
     const u = new URL(url);
 
-    // place_id= query param (explicit place ID, very reliable)
+    // place_id= query param
     const pid = u.searchParams.get("place_id");
     if (pid && !signals.chijPlaceId) signals.chijPlaceId = pid;
 
@@ -140,13 +166,19 @@ function extractSignals(url) {
       if (/^0x[a-fA-F0-9]+:0x[a-fA-F0-9]+$/i.test(ftid)) {
         signals.hexFtid = ftid;
       } else if (!signals.chijPlaceId) {
-        try { signals.chijPlaceId = decodeURIComponent(ftid); } catch {}
+        try {
+          signals.chijPlaceId = decodeURIComponent(ftid);
+        } catch {}
       }
     }
 
-    // cid= decimal CID (e.g. ?cid=8840259170776956313)
+    // cid= decimal CID
     const cid = u.searchParams.get("cid");
     if (cid && /^\d+$/.test(cid)) signals.cid = cid;
+
+    // kgmid= Knowledge Graph machine ID (from Google Search / sorry pages)
+    const kgmid = u.searchParams.get("kgmid");
+    if (kgmid) signals.kgmid = kgmid;
 
     // ll= coordinates
     const ll = u.searchParams.get("ll");
@@ -191,9 +223,39 @@ function extractSignals(url) {
   return signals;
 }
 
-// ── Places API helpers ────────────────────────────────────────────────────────
+/**
+ * Merge two signal objects, preferring the first non-null value for each key.
+ */
+function mergeSignals(a, b) {
+  return {
+    chijPlaceId: a.chijPlaceId || b.chijPlaceId,
+    cid: a.cid || b.cid,
+    hexFtid: a.hexFtid || b.hexFtid,
+    kgmid: a.kgmid || b.kgmid,
+    coordinates: a.coordinates || b.coordinates,
+    placeName: a.placeName || b.placeName,
+    searchQuery: a.searchQuery || b.searchQuery,
+  };
+}
 
-async function placesApiFetch(path, apiKey, { method = "GET", body, fieldMask } = {}) {
+function hasUsableSignals(s) {
+  return !!(
+    s.chijPlaceId ||
+    s.cid ||
+    s.hexFtid ||
+    s.kgmid ||
+    s.placeName ||
+    s.searchQuery
+  );
+}
+
+// ── Places API helpers ───────────────────────────────────────────────────────
+
+async function placesApiFetch(
+  path,
+  apiKey,
+  { method = "GET", body, fieldMask } = {}
+) {
   const headers = {
     "X-Goog-Api-Key": apiKey,
     "Content-Type": "application/json",
@@ -213,10 +275,6 @@ async function placesApiFetch(path, apiKey, { method = "GET", body, fieldMask } 
   return res.json();
 }
 
-/**
- * Text Search → first matching place ID, or null.
- * Used for business-name and search-query signals.
- */
 async function findPlaceIdFromText(textQuery, apiKey, locationBias = null) {
   const q = String(textQuery ?? "").trim();
   if (!q) return null;
@@ -235,10 +293,6 @@ async function findPlaceIdFromText(textQuery, apiKey, locationBias = null) {
   }
 }
 
-/**
- * Legacy Places API: CID (decimal) → ChIJ place_id.
- * The New Places API does not accept CIDs or hex ftid values.
- */
 async function findPlaceIdByCid(cid, apiKey) {
   try {
     const res = await fetch(
@@ -252,10 +306,6 @@ async function findPlaceIdByCid(cid, apiKey) {
   }
 }
 
-/**
- * Convert hex ftid (0xNODE:0xFACE) to decimal CID.
- * The CID is the unsigned decimal of the second (face) hex component.
- */
 function hexFtidToCid(ftid) {
   const m =
     ftid && String(ftid).match(/^0x[a-fA-F0-9]+:0x([a-fA-F0-9]+)$/i);
@@ -267,7 +317,6 @@ function hexFtidToCid(ftid) {
   }
 }
 
-/** Strip the `places/` prefix that the New Places API returns on `id` fields. */
 function placeIdForPath(id) {
   if (!id) return id;
   const s = String(id);
@@ -275,28 +324,26 @@ function placeIdForPath(id) {
 }
 
 /**
- * Resolve a set of extracted signals to a canonical ChIJ place ID.
+ * Resolve extracted signals → canonical ChIJ place ID.
  *
  * Resolution order (most → least reliable):
  *   1. ChIJ directly in URL (!1s fragment, place_id=, non-hex ftid=)
- *   2. Decimal CID (cid= param) → legacy Places API
- *   3. Hex ftid (0xNODE:0xFACE) → CID → legacy Places API
- *   4. Business name + coordinates → searchText with locationBias (tight 200m)
- *   5. Business name + coordinates → searchText with locationBias (wider 2km)
- *   6. Business name alone → searchText
- *   7. Search query (q=) → searchText
+ *   2. Decimal CID → legacy Places API
+ *   3. Hex ftid → CID → legacy Places API
+ *   4. Knowledge Graph ID (kgmid) + search query → text search
+ *   5. Name + coordinates → searchText with tight bias (200 m)
+ *   6. Name + coordinates → searchText with wider bias (2 km)
+ *   7. Name alone → searchText
+ *   8. Search query (q=) → searchText
  */
 async function resolveToPlaceId(signals, apiKey) {
-  // 1. Direct ChIJ
   if (signals.chijPlaceId) return signals.chijPlaceId;
 
-  // 2. CID → legacy Places API
   if (signals.cid) {
     const pid = await findPlaceIdByCid(signals.cid, apiKey);
     if (pid) return pid;
   }
 
-  // 3. Hex ftid → CID → legacy Places API
   if (signals.hexFtid) {
     const cid = hexFtidToCid(signals.hexFtid);
     if (cid) {
@@ -305,7 +352,13 @@ async function resolveToPlaceId(signals, apiKey) {
     }
   }
 
-  // 4 & 5. Name + coordinates → searchText with location bias (tight then wide)
+  // kgmid + search query: the q= from a Google Search URL after share.google
+  // resolution is the exact business name — highest-quality text signal.
+  if (signals.kgmid && signals.searchQuery) {
+    const pid = await findPlaceIdFromText(signals.searchQuery, apiKey);
+    if (pid) return pid;
+  }
+
   if (signals.placeName && signals.coordinates) {
     const { lat, lng } = signals.coordinates;
     const center = { latitude: lat, longitude: lng };
@@ -317,13 +370,11 @@ async function resolveToPlaceId(signals, apiKey) {
     }
   }
 
-  // 6. Name alone → searchText
   if (signals.placeName) {
     const pid = await findPlaceIdFromText(signals.placeName, apiKey);
     if (pid) return pid;
   }
 
-  // 7. Search query (q= param) → searchText
   if (signals.searchQuery) {
     const pid = await findPlaceIdFromText(signals.searchQuery, apiKey);
     if (pid) return pid;
@@ -332,7 +383,7 @@ async function resolveToPlaceId(signals, apiKey) {
   return null;
 }
 
-// ── Place details ─────────────────────────────────────────────────────────────
+// ── Place details ────────────────────────────────────────────────────────────
 
 const DETAIL_FIELD_MASK = [
   "id",
@@ -445,7 +496,7 @@ function detectMissingFields(place) {
   return fields;
 }
 
-// ── Route ─────────────────────────────────────────────────────────────────────
+// ── Route ────────────────────────────────────────────────────────────────────
 
 router.post("/lookup", requireAuth, async (req, res, next) => {
   try {
@@ -472,42 +523,64 @@ router.post("/lookup", requireAuth, async (req, res, next) => {
         .json({ message: "Enter a valid link (http or https)." });
     }
 
-    // ── Step 1: expand short/redirect URLs ───────────────────────────────────
     const originalInput = url;
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // STRATEGY A — Fast path: HTTP redirect expansion + signal extraction
+    // ─────────────────────────────────────────────────────────────────────────
+
     let workingUrl = url;
-    if (isShortUrl(url)) {
+    if (isShortOrOpaqueUrl(url)) {
       const expanded = await expandUrl(url);
       if (expanded) workingUrl = expanded;
     }
 
-    console.log("[maps/lookup] input:", originalInput.slice(0, 120));
-    console.log("[maps/lookup] working:", workingUrl.slice(0, 120));
+    console.log("[maps/lookup] input  :", originalInput.slice(0, 150));
+    console.log("[maps/lookup] httpExp:", workingUrl.slice(0, 150));
 
-    // ── Step 2: extract signals from both URL variants ───────────────────────
-    const sigA = extractSignals(workingUrl);
-    const sigB = extractSignals(originalInput);
+    let signals = mergeSignals(
+      extractSignals(workingUrl),
+      extractSignals(originalInput)
+    );
 
-    // Merge: prefer workingUrl signals, fall back to originalInput
-    const signals = {
-      chijPlaceId: sigA.chijPlaceId || sigB.chijPlaceId,
-      cid:         sigA.cid         || sigB.cid,
-      hexFtid:     sigA.hexFtid     || sigB.hexFtid,
-      coordinates: sigA.coordinates || sigB.coordinates,
-      placeName:   sigA.placeName   || sigB.placeName,
-      searchQuery: sigA.searchQuery || sigB.searchQuery,
-    };
+    console.log("[maps/lookup] signals (A):", JSON.stringify(signals));
 
-    console.log("[maps/lookup] signals:", JSON.stringify(signals));
+    let placeId = hasUsableSignals(signals)
+      ? await resolveToPlaceId(signals, apiKey)
+      : null;
 
-    // ── Step 3: resolve signals → ChIJ place ID ──────────────────────────────
-    let placeId = await resolveToPlaceId(signals, apiKey);
+    // ─────────────────────────────────────────────────────────────────────────
+    // STRATEGY B — Headless browser: follow JS redirects
+    //   Only triggered when HTTP expansion didn't give us a Maps-parsable URL
+    //   (e.g. share.google, g.page, or any new opaque format Google invents).
+    // ─────────────────────────────────────────────────────────────────────────
 
-    // Last-resort: send the full URL text to searchText
-    // (handles some cases where Google's own API understands the URL)
+    if (!placeId && (!isMapsPageUrl(workingUrl) || !hasUsableSignals(signals))) {
+      console.log("[maps/lookup] strategy A failed — launching headless browser…");
+      const browserUrl = await resolveUrlViaBrowser(originalInput);
+
+      if (browserUrl && browserUrl !== workingUrl && browserUrl !== originalInput) {
+        console.log("[maps/lookup] browser resolved:", browserUrl.slice(0, 200));
+
+        const browserSignals = extractSignals(browserUrl);
+        signals = mergeSignals(browserSignals, signals);
+
+        console.log("[maps/lookup] signals (B):", JSON.stringify(signals));
+
+        if (hasUsableSignals(signals)) {
+          placeId = await resolveToPlaceId(signals, apiKey);
+        }
+      }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // STRATEGY C — Last-resort: send raw URLs as text search
+    // ─────────────────────────────────────────────────────────────────────────
+
     if (!placeId) {
       placeId = await findPlaceIdFromText(workingUrl, apiKey);
     }
-    if (!placeId) {
+    if (!placeId && originalInput !== workingUrl) {
       placeId = await findPlaceIdFromText(originalInput, apiKey);
     }
 
@@ -515,11 +588,12 @@ router.post("/lookup", requireAuth, async (req, res, next) => {
       return res.status(422).json({
         code: "PLACE_NOT_FOUND",
         message:
-          "We couldn't find a business for this link. Try opening Google Maps, tapping Share on the business, and pasting that link here.",
+          "We couldn't find a business for this link. " +
+          "Open Google Maps in your browser, search for the business, then copy the full URL from the address bar and paste it here.",
       });
     }
 
-    // ── Step 4: fetch full place details ─────────────────────────────────────
+    // ── Fetch full place details ─────────────────────────────────────────────
     let place;
     try {
       place = await fetchPlaceDetails(placeId, apiKey);
@@ -534,7 +608,7 @@ router.post("/lookup", requireAuth, async (req, res, next) => {
       });
     }
 
-    // ── Step 5: resolve photos ────────────────────────────────────────────────
+    // ── Resolve photos ───────────────────────────────────────────────────────
     const photoNames = (place.photos ?? [])
       .slice(0, 20)
       .map((p) => p.name)
@@ -552,7 +626,9 @@ router.post("/lookup", requireAuth, async (req, res, next) => {
       relativeTime: r.relativePublishTimeDescription ?? "",
     }));
 
-    const idOut = place.id ? placeIdForPath(place.id) : placeIdForPath(placeId);
+    const idOut = place.id
+      ? placeIdForPath(place.id)
+      : placeIdForPath(placeId);
 
     return res.json({
       placeId: idOut,
