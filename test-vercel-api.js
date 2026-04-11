@@ -19,7 +19,7 @@ const html = `<!DOCTYPE html>
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Place to Page — Vercel test</title>
+  <title>placetopage.com — Vercel test</title>
   <style>
     body { margin: 0; font-family: system-ui, sans-serif; background: #0f172a; color: #f1f5f9;
            display: flex; align-items: center; justify-content: center; min-height: 100vh; text-align: center; }
@@ -30,7 +30,7 @@ const html = `<!DOCTYPE html>
 <body>
   <div>
     <h1>✅ Vercel deployment works!</h1>
-    <p>Place to Page · test deployment · ${new Date().toISOString()}</p>
+    <p>placetopage.com · test deployment · ${new Date().toISOString()}</p>
   </div>
 </body>
 </html>`;

@@ -81,7 +81,7 @@ export async function createOrder(req, res, next) {
         },
       ],
       application_context: {
-        brand_name: "Place to Page",
+        brand_name: "placetopage.com",
         locale: "en-US",
         landing_page: "NO_PREFERENCE",
         shipping_preference: "NO_SHIPPING",
