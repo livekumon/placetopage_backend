@@ -6,6 +6,7 @@ import sitesRouter from "./routes/sites.js";
 import authRouter from "./routes/auth.js";
 import mapsRouter from "./routes/maps.js";
 import enrichRouter from "./routes/enrich.js";
+import linkedinRouter from "./routes/linkedin.js";
 import paymentsRouter from "./routes/payments.js";
 import uploadRouter from "./routes/upload.js";
 import adminRouter from "./routes/admin.js";
@@ -22,7 +23,10 @@ const corsOrigins = process.env.CORS_ORIGINS
   : [
       "http://localhost:5173",
       "http://127.0.0.1:5173",
+      "http://localhost:5174",
+      "http://127.0.0.1:5174",
       "https://placetopage-frontend.vercel.app",
+      "https://linkedintowebsite.vercel.app",
     ];
 
 const app = express();
@@ -85,6 +89,7 @@ app.use("/api/admin", adminRouter);
 app.use("/api/sites", sitesRouter);
 app.use("/api/maps", mapsRouter);
 app.use("/api/enrich", enrichRouter);
+app.use("/api/linkedin", linkedinRouter);
 app.use("/api/payments", paymentsRouter);
 app.use("/api/upload", uploadRouter);
 

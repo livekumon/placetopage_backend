@@ -3,7 +3,23 @@ import mongoose from "mongoose";
 import { Site } from "../models/Site.js";
 import { User } from "../models/User.js";
 import { requireAuth } from "../middleware/auth.js";
-import { generateSiteHtml } from "../services/htmlGenerator.js";
+import { generateSiteHtml, generateLinkedInSiteHtml } from "../services/htmlGenerator.js";
+
+function buildHtml(siteType, name, theme, body) {
+  if (siteType === "linkedin") {
+    return generateLinkedInSiteHtml({ name, ...(body.placeData || {}) }, theme || "light");
+  }
+  return generateSiteHtml({
+    name,
+    theme: theme || "light",
+    placeData: {
+      ...(body.placeData || {}),
+      mapsUrl: body.mapsUrl,
+      category: body.category || "Business",
+      photoUrl: body.thumbnailUrl || body.placeData?.photoUrl,
+    },
+  });
+}
 import {
   deployToVercel,
   addCustomDomain,
@@ -153,7 +169,7 @@ router.post("/", requireAuth, async (req, res, next) => {
       return res.status(402).json({ message: "No credits remaining" });
     }
 
-    const { name, mapsUrl, category, thumbnailUrl, theme, slug: bodySlug, placeData } = req.body;
+    const { name, mapsUrl, category, thumbnailUrl, theme, slug: bodySlug, placeData, siteType } = req.body;
     if (!name) return res.status(400).json({ message: "name is required" });
 
     let slug = bodySlug ? slugify(bodySlug) : slugify(name);
@@ -165,16 +181,7 @@ router.post("/", requireAuth, async (req, res, next) => {
     }
 
     // Generate the HTML and store it — do NOT deploy yet
-    const html = generateSiteHtml({
-      name,
-      theme: theme || "light",
-      placeData: {
-        ...(placeData || {}),
-        mapsUrl,
-        category: category || "Business",
-        photoUrl: thumbnailUrl || placeData?.photoUrl,
-      },
-    });
+    const html = buildHtml(siteType, name, theme, req.body);
 
     const site = await Site.create({
       userId: req.userId,
@@ -189,6 +196,7 @@ router.post("/", requireAuth, async (req, res, next) => {
       pageViews: 0,
       generatedHtml: html,
       placeData: placeData || null,
+      siteType: siteType === "linkedin" ? "linkedin" : "maps",
     });
 
     user.creditsRemaining -= 1;
@@ -204,16 +212,12 @@ router.post("/", requireAuth, async (req, res, next) => {
 // ── POST /preview — render HTML without saving (editor live preview) ─────────
 router.post("/preview", requireAuth, async (req, res, next) => {
   try {
-    const { name, theme, mapsUrl, category, thumbnailUrl, placeData } = req.body;
-    const html = generateSiteHtml({
-      name: name || "Untitled",
-      theme: ["light", "dark", "bold"].includes(theme) ? theme : "light",
-      placeData: {
-        ...(placeData && typeof placeData === "object" ? placeData : {}),
-        mapsUrl,
-        category: category || "Business",
-        photoUrl: thumbnailUrl || placeData?.photoUrl,
-      },
+    const { name, theme, mapsUrl, category, thumbnailUrl, placeData, siteType } = req.body;
+    const safeTheme = ["light", "dark", "bold"].includes(theme) ? theme : "light";
+    const html = buildHtml(siteType, name || "Untitled", safeTheme, {
+      mapsUrl, category: category || "Business",
+      thumbnailUrl: thumbnailUrl || placeData?.photoUrl,
+      placeData: placeData && typeof placeData === "object" ? placeData : {},
     });
     res.json({ html });
   } catch (e) {
@@ -450,15 +454,11 @@ router.patch("/:id", requireAuth, async (req, res, next) => {
     }
 
     const pd = site.placeData || {};
-    const html = generateSiteHtml({
-      name: site.name,
-      theme: site.theme || "light",
-      placeData: {
-        ...pd,
-        mapsUrl: site.mapsUrl,
-        category: site.category || "Business",
-        photoUrl: site.thumbnailUrl || pd.photoUrl,
-      },
+    const html = buildHtml(site.siteType, site.name, site.theme, {
+      mapsUrl: site.mapsUrl,
+      category: site.category || "Business",
+      thumbnailUrl: site.thumbnailUrl,
+      placeData: { ...pd },
     });
     site.generatedHtml = html;
 

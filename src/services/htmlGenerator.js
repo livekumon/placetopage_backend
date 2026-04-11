@@ -1099,3 +1099,562 @@ export function generateSiteHtml({ name, theme = "light", placeData = {} }) {
 </body>
 </html>`;
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// LinkedIn Profile Website Generator
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Generate a static HTML personal profile website from LinkedIn data + AI copy.
+ *
+ * @param {object} data  - Merged profile + AI content
+ * @param {string} theme - 'light' | 'dark' | 'bold'
+ * @returns {string}     - Complete HTML document
+ */
+export function generateLinkedInSiteHtml(data = {}, theme = "light") {
+  const t = THEMES[theme] || THEMES.light;
+
+  const {
+    fullName = "Professional",
+    headline = "",
+    location = "",
+    currentPosition = "",
+    currentCompany = "",
+    profilePhotoUrl = "",
+    bannerPhotoUrl = "",
+    skills = [],
+    experience = [],
+    education = [],
+    certifications = [],
+    profileUrl = "",
+    // AI-generated
+    heroHeadline = "",
+    tagline = "",
+    aboutSummary = "",
+    ctaText = "Get In Touch",
+    seoDescription = "",
+    highlights = [],
+  } = data;
+
+  const displayHeadline = heroHeadline || headline || `${currentPosition} at ${currentCompany}`.replace(/^ at | at $/, "").trim() || "Professional";
+  const displayTagline = tagline || headline || "";
+  const displayAbout = aboutSummary || data.summary || "";
+  const seoDesc = seoDescription || `${fullName} — ${headline || currentPosition}`.trim();
+  const bannerSrc = bannerPhotoUrl || "";
+  const avatarSrc = profilePhotoUrl || "";
+
+  // ── Sections ──────────────────────────────────────────────────────────────
+
+  function renderHighlights() {
+    if (!highlights.length) return "";
+    return `
+    <section class="section highlights-section">
+      <div class="container">
+        <div class="highlights-grid">
+          ${highlights.map((h) => `
+          <div class="highlight-card">
+            <span class="highlight-dot"></span>
+            <p class="highlight-text">${esc(h)}</p>
+          </div>`).join("")}
+        </div>
+      </div>
+    </section>`;
+  }
+
+  function renderExperience() {
+    if (!experience.length) return "";
+    const items = experience.slice(0, 6).map((e) => `
+        <div class="timeline-item">
+          <div class="timeline-dot"></div>
+          <div class="timeline-content">
+            <p class="timeline-title">${esc(e.title || "")}</p>
+            <p class="timeline-company">${esc(e.company || "")}${e.duration ? ` <span class="timeline-duration">· ${esc(e.duration)}</span>` : ""}</p>
+            ${e.description ? `<p class="timeline-desc">${esc(e.description)}</p>` : ""}
+          </div>
+        </div>`).join("");
+    return `
+    <section class="section experience-section">
+      <div class="container">
+        <h2 class="section-title">Experience</h2>
+        <div class="timeline">${items}</div>
+      </div>
+    </section>`;
+  }
+
+  function renderEducation() {
+    if (!education.length) return "";
+    const items = education.slice(0, 4).map((e) => `
+        <div class="edu-card">
+          <p class="edu-degree">${esc(e.degree || e.field || "")}</p>
+          <p class="edu-school">${esc(e.school || "")}</p>
+          ${e.year ? `<p class="edu-year">${esc(e.year)}</p>` : ""}
+        </div>`).join("");
+    return `
+    <section class="section education-section">
+      <div class="container">
+        <h2 class="section-title">Education</h2>
+        <div class="edu-grid">${items}</div>
+      </div>
+    </section>`;
+  }
+
+  function renderSkills() {
+    if (!skills.length) return "";
+    return `
+    <section class="section skills-section">
+      <div class="container">
+        <h2 class="section-title">Skills</h2>
+        <div class="skills-cloud">
+          ${skills.slice(0, 20).map((s) => `<span class="skill-tag">${esc(s)}</span>`).join("")}
+        </div>
+      </div>
+    </section>`;
+  }
+
+  function renderCerts() {
+    if (!certifications.length) return "";
+    const items = certifications.slice(0, 6).map((c) => `
+        <div class="cert-card">
+          <span class="material-symbols-outlined cert-icon">verified</span>
+          <p class="cert-name">${esc(c.name || c)}</p>
+          ${c.issuer ? `<p class="cert-issuer">${esc(c.issuer)}</p>` : ""}
+        </div>`).join("");
+    return `
+    <section class="section certs-section">
+      <div class="container">
+        <h2 class="section-title">Certifications</h2>
+        <div class="certs-grid">${items}</div>
+      </div>
+    </section>`;
+  }
+
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>${esc(fullName)} — ${esc(headline || currentPosition || "Professional Profile")}</title>
+  <meta name="description" content="${esc(seoDesc)}" />
+  <meta property="og:title" content="${esc(fullName)}" />
+  <meta property="og:description" content="${esc(seoDesc)}" />
+  ${avatarSrc ? `<meta property="og:image" content="${esc(avatarSrc)}" />` : ""}
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=${t.googleFonts}&display=swap" rel="stylesheet" />
+  <link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@20..48,100..700,0..1,-50..200" rel="stylesheet" />
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    :root {
+      --bg: ${t.bg};
+      --surface: ${t.surface};
+      --surface-alt: ${t.surfaceAlt};
+      --text: ${t.text};
+      --text-muted: ${t.textMuted};
+      --text-light: ${t.textLight};
+      --primary: ${t.primary};
+      --primary-hover: ${t.primaryHover};
+      --primary-text: ${t.primaryText};
+      --accent: ${t.accent};
+      --border: ${t.border};
+      --card-bg: ${t.cardBg};
+      --card-shadow: ${t.cardShadow};
+      --star-color: ${t.starColor};
+      --nav-bg: ${t.navBg};
+      --nav-text: ${t.navText};
+      --nav-border: ${t.navBorder};
+      --heading-font: ${t.headingFont};
+      --body-font: ${t.bodyFont};
+    }
+
+    html { scroll-behavior: smooth; }
+    body {
+      font-family: var(--body-font);
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.6;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    a { text-decoration: none; }
+    img { max-width: 100%; }
+
+    /* ── NAV ── */
+    .nav {
+      position: sticky; top: 0; z-index: 100;
+      background: var(--nav-bg);
+      border-bottom: 1px solid var(--nav-border);
+      backdrop-filter: blur(12px);
+      -webkit-backdrop-filter: blur(12px);
+      padding: 0.875rem 1.5rem;
+      display: flex; align-items: center; justify-content: space-between;
+    }
+    .nav-name {
+      font-family: var(--heading-font);
+      font-size: 1.1rem; font-weight: 700;
+      color: var(--nav-text);
+    }
+    .nav-cta {
+      background: var(--primary); color: var(--primary-text);
+      padding: 0.5rem 1.25rem;
+      border-radius: 999px;
+      font-size: 0.85rem; font-weight: 600;
+      transition: opacity 0.15s;
+    }
+    .nav-cta:hover { opacity: 0.88; }
+
+    /* ── HERO ── */
+    .hero {
+      position: relative;
+      min-height: 520px;
+      display: flex; flex-direction: column; align-items: center; justify-content: flex-end;
+      padding: 3.5rem 1.5rem 3rem;
+      overflow: hidden;
+      text-align: center;
+    }
+    .hero-banner {
+      position: absolute; inset: 0;
+      object-fit: cover; width: 100%; height: 100%;
+      z-index: 0;
+    }
+    .hero-banner-fallback {
+      position: absolute; inset: 0;
+      background: linear-gradient(135deg, var(--primary) 0%, var(--accent) 100%);
+      z-index: 0;
+    }
+    .hero-overlay {
+      position: absolute; inset: 0;
+      background: ${t.heroOverlay};
+      z-index: 1;
+    }
+    .hero-content {
+      position: relative; z-index: 2;
+      max-width: 700px;
+    }
+    .hero-avatar-wrap {
+      margin: 0 auto 1.25rem;
+    }
+    .hero-avatar {
+      width: 120px; height: 120px;
+      border-radius: 50%;
+      border: 4px solid rgba(255,255,255,0.85);
+      object-fit: cover;
+      box-shadow: 0 8px 32px rgba(0,0,0,0.25);
+    }
+    .hero-avatar-fallback {
+      width: 120px; height: 120px;
+      border-radius: 50%;
+      border: 4px solid rgba(255,255,255,0.85);
+      background: var(--primary);
+      display: flex; align-items: center; justify-content: center;
+      font-family: var(--heading-font);
+      font-size: 2.5rem; font-weight: 700; color: #fff;
+      box-shadow: 0 8px 32px rgba(0,0,0,0.25);
+      margin: 0 auto;
+    }
+    .hero-name {
+      font-family: var(--heading-font);
+      font-size: clamp(2rem, 5vw, 3rem);
+      font-weight: 900;
+      color: #fff;
+      text-shadow: 0 2px 16px rgba(0,0,0,0.4);
+      line-height: 1.1;
+      margin-bottom: 0.5rem;
+    }
+    .hero-headline {
+      font-size: clamp(1.1rem, 2.5vw, 1.4rem);
+      color: rgba(255,255,255,0.9);
+      font-weight: 500;
+      margin-bottom: 0.5rem;
+      text-shadow: 0 1px 8px rgba(0,0,0,0.3);
+    }
+    .hero-tagline {
+      font-size: 1rem;
+      color: rgba(255,255,255,0.75);
+      margin-bottom: 1.5rem;
+      text-shadow: 0 1px 6px rgba(0,0,0,0.3);
+    }
+    .hero-location {
+      display: inline-flex; align-items: center; gap: 0.3rem;
+      font-size: 0.9rem; color: rgba(255,255,255,0.75);
+      margin-bottom: 1.5rem;
+    }
+    .hero-cta {
+      display: inline-flex; align-items: center; gap: 0.5rem;
+      background: var(--primary); color: var(--primary-text);
+      padding: 0.85rem 2rem;
+      border-radius: 999px;
+      font-size: 1rem; font-weight: 700;
+      box-shadow: 0 4px 24px rgba(0,0,0,0.25);
+      transition: transform 0.15s, box-shadow 0.15s;
+    }
+    .hero-cta:hover { transform: translateY(-2px); box-shadow: 0 8px 32px rgba(0,0,0,0.3); }
+    .hero-linkedin-link {
+      display: inline-flex; align-items: center; gap: 0.4rem;
+      margin-top: 1rem;
+      font-size: 0.82rem; color: rgba(255,255,255,0.65);
+      transition: color 0.15s;
+    }
+    .hero-linkedin-link:hover { color: rgba(255,255,255,0.9); }
+
+    /* ── SHARED SECTION ── */
+    .section { padding: 4rem 1.5rem; }
+    .section:nth-child(even) { background: var(--surface); }
+    .container { max-width: 860px; margin: 0 auto; }
+    .section-title {
+      font-family: var(--heading-font);
+      font-size: clamp(1.5rem, 3vw, 2rem);
+      font-weight: 700; color: var(--text);
+      margin-bottom: 2rem;
+      position: relative;
+      padding-bottom: 0.75rem;
+    }
+    .section-title::after {
+      content: "";
+      position: absolute; left: 0; bottom: 0;
+      width: 3rem; height: 3px;
+      background: var(--primary); border-radius: 2px;
+    }
+
+    /* ── ABOUT ── */
+    .about-section .about-text p {
+      font-size: 1.05rem;
+      color: var(--text-muted);
+      line-height: 1.8;
+      margin-bottom: 1rem;
+    }
+    .about-section .about-text p:last-child { margin-bottom: 0; }
+    .about-meta {
+      display: flex; flex-wrap: wrap; gap: 1rem;
+      margin-top: 1.5rem;
+    }
+    .about-meta-chip {
+      display: flex; align-items: center; gap: 0.4rem;
+      background: var(--surface-alt);
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      padding: 0.4rem 1rem;
+      font-size: 0.82rem; color: var(--text-muted);
+    }
+    .about-meta-chip .material-symbols-outlined { font-size: 1rem; color: var(--primary); }
+
+    /* ── HIGHLIGHTS ── */
+    .highlights-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+      gap: 1rem;
+    }
+    .highlight-card {
+      display: flex; align-items: flex-start; gap: 0.75rem;
+      background: var(--card-bg);
+      border: 1px solid var(--border);
+      border-radius: 1rem;
+      padding: 1rem 1.25rem;
+      box-shadow: var(--card-shadow);
+    }
+    .highlight-dot {
+      flex-shrink: 0;
+      width: 8px; height: 8px;
+      border-radius: 50%;
+      background: var(--primary);
+      margin-top: 0.4rem;
+    }
+    .highlight-text {
+      font-size: 0.9rem; color: var(--text-muted); line-height: 1.5;
+    }
+
+    /* ── TIMELINE (Experience) ── */
+    .timeline { position: relative; }
+    .timeline::before {
+      content: "";
+      position: absolute; left: 10px; top: 6px; bottom: 0;
+      width: 2px; background: var(--border);
+    }
+    .timeline-item {
+      position: relative;
+      padding-left: 2.5rem;
+      margin-bottom: 2rem;
+    }
+    .timeline-dot {
+      position: absolute; left: 4px; top: 6px;
+      width: 14px; height: 14px;
+      border-radius: 50%;
+      background: var(--primary);
+      border: 2px solid var(--bg);
+    }
+    .timeline-title {
+      font-weight: 700; font-size: 1rem; color: var(--text);
+      margin-bottom: 0.15rem;
+    }
+    .timeline-company {
+      font-size: 0.9rem; color: var(--text-muted);
+      margin-bottom: 0.5rem;
+    }
+    .timeline-duration { color: var(--text-light); font-size: 0.82rem; }
+    .timeline-desc { font-size: 0.88rem; color: var(--text-muted); line-height: 1.6; }
+
+    /* ── EDUCATION ── */
+    .edu-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+      gap: 1rem;
+    }
+    .edu-card {
+      background: var(--card-bg);
+      border: 1px solid var(--border);
+      border-radius: 1rem;
+      padding: 1.25rem;
+      box-shadow: var(--card-shadow);
+    }
+    .edu-degree { font-weight: 700; font-size: 0.95rem; color: var(--text); margin-bottom: 0.25rem; }
+    .edu-school { font-size: 0.88rem; color: var(--primary); }
+    .edu-year { font-size: 0.8rem; color: var(--text-light); margin-top: 0.25rem; }
+
+    /* ── SKILLS ── */
+    .skills-cloud { display: flex; flex-wrap: wrap; gap: 0.6rem; }
+    .skill-tag {
+      background: var(--surface-alt);
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      padding: 0.35rem 0.9rem;
+      font-size: 0.82rem; color: var(--text-muted);
+      transition: background 0.15s, color 0.15s;
+    }
+    .skill-tag:hover { background: var(--primary); color: var(--primary-text); border-color: var(--primary); }
+
+    /* ── CERTIFICATIONS ── */
+    .certs-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+      gap: 1rem;
+    }
+    .cert-card {
+      background: var(--card-bg);
+      border: 1px solid var(--border);
+      border-radius: 1rem;
+      padding: 1.25rem;
+      box-shadow: var(--card-shadow);
+      display: flex; flex-direction: column; gap: 0.35rem;
+    }
+    .cert-icon { font-size: 1.5rem; color: var(--primary); }
+    .cert-name { font-weight: 700; font-size: 0.9rem; color: var(--text); }
+    .cert-issuer { font-size: 0.8rem; color: var(--text-muted); }
+
+    /* ── CONTACT / FOOTER ── */
+    .footer {
+      background: var(--surface);
+      border-top: 1px solid var(--border);
+      padding: 3rem 1.5rem;
+      text-align: center;
+    }
+    .footer-name {
+      font-family: var(--heading-font);
+      font-size: 1.5rem; font-weight: 700; color: var(--text);
+      margin-bottom: 0.5rem;
+    }
+    .footer-tagline {
+      font-size: 0.95rem; color: var(--text-muted);
+      margin-bottom: 1.5rem;
+    }
+    .footer-links {
+      display: flex; flex-wrap: wrap; justify-content: center; gap: 0.75rem;
+      margin-bottom: 1.5rem;
+    }
+    .footer-link {
+      display: inline-flex; align-items: center; gap: 0.35rem;
+      font-size: 0.85rem; font-weight: 600;
+      color: var(--primary);
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      padding: 0.45rem 1rem;
+      transition: background 0.15s, color 0.15s;
+    }
+    .footer-link:hover { background: var(--primary); color: var(--primary-text); border-color: var(--primary); }
+    .footer-bottom {
+      font-size: 0.78rem; color: var(--text-light);
+      margin-top: 1.5rem;
+    }
+
+    @media (max-width: 640px) {
+      .hero { min-height: 420px; padding: 2.5rem 1rem 2rem; }
+      .hero-avatar { width: 90px; height: 90px; }
+      .hero-avatar-fallback { width: 90px; height: 90px; font-size: 2rem; }
+      .section { padding: 2.5rem 1rem; }
+      .timeline::before { left: 7px; }
+      .timeline-item { padding-left: 2rem; }
+      .timeline-dot { left: 1px; }
+    }
+  </style>
+</head>
+<body>
+
+  <!-- NAV -->
+  <nav class="nav">
+    <span class="nav-name">${esc(fullName)}</span>
+    ${profileUrl ? `<a href="${esc(profileUrl)}" target="_blank" rel="noopener noreferrer" class="nav-cta">${esc(ctaText)}</a>` : ""}
+  </nav>
+
+  <!-- HERO -->
+  <section class="hero">
+    ${bannerSrc
+      ? `<img src="${esc(bannerSrc)}" alt="" class="hero-banner" loading="eager" />`
+      : `<div class="hero-banner-fallback"></div>`}
+    <div class="hero-overlay"></div>
+    <div class="hero-content">
+      <div class="hero-avatar-wrap">
+        ${avatarSrc
+          ? `<img src="${esc(avatarSrc)}" alt="${esc(fullName)}" class="hero-avatar" loading="eager" />`
+          : `<div class="hero-avatar-fallback">${esc((fullName || "?").charAt(0).toUpperCase())}</div>`}
+      </div>
+      <h1 class="hero-name">${esc(fullName)}</h1>
+      ${displayHeadline ? `<p class="hero-headline">${esc(displayHeadline)}</p>` : ""}
+      ${displayTagline ? `<p class="hero-tagline">${esc(displayTagline)}</p>` : ""}
+      ${location ? `<p class="hero-location"><span class="material-symbols-outlined" style="font-size:1rem">location_on</span>${esc(location)}</p>` : ""}
+      ${profileUrl ? `<a href="${esc(profileUrl)}" target="_blank" rel="noopener noreferrer" class="hero-cta">
+        <span class="material-symbols-outlined" style="font-size:1.1rem">open_in_new</span>
+        ${esc(ctaText)}
+      </a>` : ""}
+      ${profileUrl ? `<br/><a href="${esc(profileUrl)}" target="_blank" rel="noopener noreferrer" class="hero-linkedin-link">
+        <span class="material-symbols-outlined" style="font-size:0.9rem">link</span>
+        View LinkedIn Profile
+      </a>` : ""}
+    </div>
+  </section>
+
+  <!-- ABOUT -->
+  ${displayAbout ? `
+  <section class="section about-section">
+    <div class="container">
+      <h2 class="section-title">About</h2>
+      <div class="about-text">
+        ${displayAbout.split(/\n\n+/).map((para) => `<p>${esc(para.trim())}</p>`).join("\n")}
+      </div>
+      ${(currentPosition || currentCompany || location) ? `
+      <div class="about-meta">
+        ${currentPosition ? `<span class="about-meta-chip"><span class="material-symbols-outlined">work</span>${esc(currentPosition)}</span>` : ""}
+        ${currentCompany ? `<span class="about-meta-chip"><span class="material-symbols-outlined">business</span>${esc(currentCompany)}</span>` : ""}
+        ${location ? `<span class="about-meta-chip"><span class="material-symbols-outlined">location_on</span>${esc(location)}</span>` : ""}
+      </div>` : ""}
+    </div>
+  </section>` : ""}
+
+  ${renderHighlights()}
+  ${renderExperience()}
+  ${renderEducation()}
+  ${renderSkills()}
+  ${renderCerts()}
+
+  <!-- FOOTER -->
+  <footer class="footer">
+    <p class="footer-name">${esc(fullName)}</p>
+    ${displayTagline ? `<p class="footer-tagline">${esc(displayTagline)}</p>` : ""}
+    <div class="footer-links">
+      ${profileUrl ? `<a href="${esc(profileUrl)}" target="_blank" rel="noopener noreferrer" class="footer-link">
+        <span class="material-symbols-outlined" style="font-size:0.95rem">link</span>LinkedIn
+      </a>` : ""}
+    </div>
+    <p class="footer-bottom">Profile website generated by Place to Page</p>
+  </footer>
+
+</body>
+</html>`;
+}

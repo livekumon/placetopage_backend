@@ -12,6 +12,7 @@ const siteSchema = new mongoose.Schema(
     slug: { type: String, required: true, unique: true, index: true },
     subdomain: { type: String },
     category: { type: String, default: "Business" },
+    siteType: { type: String, enum: ["maps", "linkedin"], default: "maps" },
         mapsUrl: { type: String },
         thumbnailUrl: { type: String },
         pageViews: { type: Number, default: 0 },
